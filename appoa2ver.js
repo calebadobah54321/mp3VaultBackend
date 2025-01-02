@@ -6,91 +6,179 @@ const fs = require('fs');
 const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3002;
-const { COOKIE_FILE, initializeCookies } = require('./cookies');
+
+// Add OAuth2 credentials
+const OAUTH2_CLIENT_ID = '861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com';
+const OAUTH2_CLIENT_SECRET = 'SboVhoG9s0rNafixCSGGKXAT';
+const OAUTH2_SCOPES = 'http://gdata.youtube.com https://www.googleapis.com/auth/youtube';
+
+// Add OAuth2 token storage
+let oauthTokenData = null;
+
+async function refreshOAuthToken(refreshToken) {
+    try {
+        const response = await fetch('https://www.youtube.com/o/oauth2/token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                client_id: OAUTH2_CLIENT_ID,
+                client_secret: OAUTH2_CLIENT_SECRET,
+                refresh_token: refreshToken,
+                grant_type: 'refresh_token'
+            })
+        });
+
+        const data = await response.json();
+        if (data.error) {
+            console.error('Token refresh failed:', data.error);
+            return null;
+        }
+
+        return {
+            access_token: data.access_token,
+            expires: Date.now() + (data.expires_in * 1000),
+            token_type: data.token_type,
+            refresh_token: data.refresh_token || refreshToken
+        };
+    } catch (error) {
+        console.error('Error refreshing token:', error);
+        return null;
+    }
+}
+
+async function initializeOAuth() {
+    try {
+        const response = await fetch('https://www.youtube.com/o/oauth2/device/code', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                client_id: OAUTH2_CLIENT_ID,
+                scope: OAUTH2_SCOPES,
+                device_id: crypto.randomUUID(),
+                device_model: 'ytlr::'
+            })
+        });
+
+        const deviceCode = await response.json();
+        console.log(`To authorize, visit: ${deviceCode.verification_url} and enter code: ${deviceCode.user_code}`);
+
+        // Poll for authorization
+        while (true) {
+            const tokenResponse = await fetch('https://www.youtube.com/o/oauth2/token', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    client_id: OAUTH2_CLIENT_ID,
+                    client_secret: OAUTH2_CLIENT_SECRET,
+                    code: deviceCode.device_code,
+                    grant_type: 'http://oauth.net/grant_type/device/1.0'
+                })
+            });
+
+            const tokenData = await tokenResponse.json();
+            if (tokenData.error) {
+                if (tokenData.error === 'authorization_pending') {
+                    await new Promise(resolve => setTimeout(resolve, deviceCode.interval * 1000));
+                    continue;
+                }
+                throw new Error(`OAuth error: ${tokenData.error}`);
+            }
+
+            return {
+                access_token: tokenData.access_token,
+                expires: Date.now() + (tokenData.expires_in * 1000),
+                refresh_token: tokenData.refresh_token,
+                token_type: tokenData.token_type
+            };
+        }
+    } catch (error) {
+        console.error('OAuth initialization failed:', error);
+        throw error;
+    }
+}
 
 
 app.use(cors());
 app.use(express.json());
+// Enhanced headers to better mimic a real browser
+const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"'
+};
 
+const OUTPUT_DIR= path.join(__dirname, 'downloads');
 
+async function getInnertubeCredentials() {
+    try {
+        // Check and refresh OAuth token if needed
+        if (!oauthTokenData || oauthTokenData.expires <= Date.now() + 60000) {
+            if (oauthTokenData?.refresh_token) {
+                oauthTokenData = await refreshOAuthToken(oauthTokenData.refresh_token);
+            }
+            if (!oauthTokenData) {
+                oauthTokenData = await initializeOAuth();
+            }
+        }
 
-
-
-
-
-
-async function downloadSong(song) {
-    const downloadId = crypto.randomUUID();
-    const safeFileName = `${song.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp3`.substring(0, 200);
-    const outputPath = path.join(OUTPUT_DIR, safeFileName);
-
-    return new Promise((resolve, reject) => {
-        const ytdlpArgs = [
-            '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '0',
-            '--cookies', COOKIE_FILE,  // Use cookies file for authentication
-            '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
-            '--sponsorblock-remove', 'all',
-            '--force-keyframes-at-cuts',
-            '--no-playlist',
-            '--embed-thumbnail',
-            '--no-warnings',
-            '--verbose',
-            `https://youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
-        ];
-
-        const process = spawn('yt-dlp', ytdlpArgs);
-
-        let errorOutput = '';
-        let stdoutOutput = '';
-
-        process.stdout.on('data', (data) => {
-            stdoutOutput += data.toString();
-            console.log('yt-dlp stdout:', data.toString());
-        });
-
-        process.stderr.on('data', (data) => {
-            errorOutput += data.toString();
-            console.error('yt-dlp stderr:', data.toString());
-        });
-
-        const timeout = setTimeout(() => {
-            process.kill();
-            reject(new Error('Download timed out'));
-        }, 5 * 60 * 1000);
-
-        process.on('close', (code) => {
-            clearTimeout(timeout);
-            if (code === 0) {
-                resolve({
-                    downloadId,
-                    fileName: safeFileName,
-                    filePath: outputPath
-                });
-            } else {
-                console.error('yt-dlp failed with code:', code);
-                console.error('Error output:', errorOutput);
-                console.error('Stdout output:', stdoutOutput);
-                reject(new Error(`Download failed (code ${code}): ${errorOutput}`));
+        // Make authenticated request to YouTube
+        const response = await fetch('https://www.youtube.com', {
+            headers: {
+                ...BROWSER_HEADERS,
+                'Authorization': `${oauthTokenData.token_type} ${oauthTokenData.access_token}`
             }
         });
 
-        process.on('error', (error) => {
-            clearTimeout(timeout);
-            console.error('yt-dlp process error:', error);
-            reject(error);
-        });
-    });
-}
+        const html = await response.text();
 
+        // Extract required credentials
+        const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
+        const clientVersionMatch = html.match(/"clientVersion":"([^"]+)"/);
+        const visitorDataMatch = html.match(/"visitorData":"([^"]+)"/);
+        const stsMatch = html.match(/"signatureTimestamp":(\d+)/);
 
+        if (!apiKeyMatch) {
+            throw new Error('Failed to extract API key');
+        }
 
-
-const OUTPUT_DIR = path.join(process.cwd(), 'downloads');
-if (!fs.existsSync(OUTPUT_DIR)) {
-    fs.mkdirSync(OUTPUT_DIR);
+        return {
+            apiKey: apiKeyMatch[1],
+            clientVersion: clientVersionMatch?.[1] || '2.20240101.00.00',
+            visitorData: visitorDataMatch?.[1] || '',
+            sts: stsMatch?.[1] || Math.floor(Date.now() / 1000).toString(),
+            context: {
+                client: {
+                    hl: "en",
+                    gl: "US",
+                    clientName: "WEB",
+                    clientVersion: clientVersionMatch?.[1] || '2.20240101.00.00',
+                    originalUrl: "https://www.youtube.com",
+                    platform: "DESKTOP"
+                }
+            },
+            oauthToken: oauthTokenData
+        };
+    } catch (error) {
+        console.error('Error in getInnertubeCredentials:', error);
+        throw error;
+    }
 }
 
 const downloads = new Map();
@@ -110,14 +198,14 @@ const HEADERS = {
     'Referer': 'https://www.youtube.com/',
 };
 
-
+const COOKIE_FILE = path.join(__dirname, 'cookies.txt');
 
 
 
 async function searchSongs(query) {
     const cacheKey = query.toLowerCase();
     const cachedResult = searchCache.get(cacheKey);
-    
+
     if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_DURATION) {
         return cachedResult.results;
     }
@@ -126,7 +214,7 @@ async function searchSongs(query) {
         // Make two searches: one for audio, one for music videos
         const audioQuery = encodeURIComponent(query + ' audio');
         const videoQuery = encodeURIComponent(query);
-        
+
         // Search URLs for both types
         const audioUrl = `https://www.youtube.com/results?search_query=${audioQuery}&sp=EgIQAQ%253D%253D`;
         const videoUrl = `https://www.youtube.com/results?search_query=${videoQuery}&sp=EgIQAUICCAE%253D`;
@@ -187,16 +275,16 @@ async function processSearchResults(html, isAudioSearch) {
         const viewCountText = videoRenderer.viewCountText?.simpleText || '0 views';
         const channelName = videoRenderer.ownerText?.runs[0]?.text || 'Unknown Channel';
         const thumbnails = videoRenderer.thumbnail?.thumbnails || [];
-        const thumbnail = thumbnails.length > 0 
+        const thumbnail = thumbnails.length > 0
             ? thumbnails[thumbnails.length - 1].url
             : `https://i.ytimg.com/vi/${videoRenderer.videoId}/hqdefault.jpg`;
 
         // Check for official music video indicators
         const isOfficialVideo = videoRenderer.title?.runs[0]?.text?.toLowerCase().includes('official') ||
-                              videoRenderer.title?.runs[0]?.text?.toLowerCase().includes('music video') ||
-                              videoRenderer.ownerBadges?.some(badge => 
-                                badge?.metadataBadgeRenderer?.tooltip === 'Official Artist Channel'
-                              );
+            videoRenderer.title?.runs[0]?.text?.toLowerCase().includes('music video') ||
+            videoRenderer.ownerBadges?.some(badge =>
+                badge?.metadataBadgeRenderer?.tooltip === 'Official Artist Channel'
+            );
 
         results.push({
             title: videoRenderer.title.runs[0].text,
@@ -259,10 +347,10 @@ function mergeAndDeduplicateResults(audioResults, videoResults) {
 }
 
 function isLiveStream(videoRenderer) {
-    return videoRenderer?.badges?.some(badge => 
-        badge?.liveBroadcastBadge || 
+    return videoRenderer?.badges?.some(badge =>
+        badge?.liveBroadcastBadge ||
         (badge?.labelBadge?.label === 'LIVE')
-    ) || videoRenderer?.thumbnailOverlays?.some(overlay => 
+    ) || videoRenderer?.thumbnailOverlays?.some(overlay =>
         overlay?.thumbnailOverlayTimeStatusRenderer?.text?.simpleText === 'LIVE'
     );
 }
@@ -335,28 +423,23 @@ async function downloadVideo(video, format) {
     const downloadId = crypto.randomUUID();
     const safeFileName = `${video.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp4`.substring(0, 200);
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
-  
+
     return new Promise((resolve, reject) => {
-        // Basic yt-dlp arguments
         const ytdlpArgs = [
             '--no-playlist',
             '--no-warnings',
             '--no-progress',
-            '--cookies', COOKIE_FILE,
-            '-f', format,  // Will handle both single formats and format+audio combinations
+            '-f', format,
             '--merge-output-format', 'mp4',
             '--audio-quality', '0',
             '--add-metadata',
             '--embed-thumbnail',
-            '--add-header', `Authorization: ${tokenData.token_type} ${tokenData.access_token}`,
-            `https://youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
             `https://youtube.com/watch?v=${video.youtubeId}`,
             '-o', outputPath
         ];
 
         const process = spawn('yt-dlp', ytdlpArgs);
-
+        
         let errorOutput = '';
 
         process.stderr.on('data', (data) => {
@@ -366,7 +449,7 @@ async function downloadVideo(video, format) {
         const timeout = setTimeout(() => {
             process.kill();
             reject(new Error('Download timed out'));
-        }, 10 * 60 * 1000); // 10 minutes timeout for video downloads
+        }, 10 * 60 * 1000);
 
         process.on('close', (code) => {
             clearTimeout(timeout);
@@ -390,7 +473,6 @@ async function downloadVideo(video, format) {
 
 
 
-
 // In your Express server code, add these constants at the top
 const ITEMS_PER_PAGE = 12;
 const MAX_ITEMS = 100;
@@ -400,15 +482,15 @@ const allVideosCache = new Map();
 
 async function getTrendingSongs(countryCode = 'US', page = 1) {
     const cacheKey = countryCode.toUpperCase();
-    
+
     // Try to get all videos from cache first
     let allVideos = allVideosCache.get(cacheKey)?.videos;
     const cacheTimestamp = allVideosCache.get(cacheKey)?.timestamp;
 
     // Check if we need to fetch fresh data
-    const needsFresh = !allVideos || 
-                      !cacheTimestamp || 
-                      (Date.now() - cacheTimestamp > TRENDING_CACHE_DURATION);
+    const needsFresh = !allVideos ||
+        !cacheTimestamp ||
+        (Date.now() - cacheTimestamp > TRENDING_CACHE_DURATION);
 
     if (needsFresh) {
         try {
@@ -423,7 +505,7 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
 
             const html = await response.text();
             const initialDataMatch = html.match(/var ytInitialData = (.+?);<\/script>/);
-            
+
             if (!initialDataMatch) {
                 throw new Error('Could not find initial data');
             }
@@ -436,7 +518,7 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
                 const tabContent = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
                 for (const section of tabContent) {
                     const items = section?.itemSectionRenderer?.contents?.[0]?.shelfRenderer?.content?.expandedShelfContentsRenderer?.items || [];
-                    
+
                     for (const item of items) {
                         const videoRenderer = item.videoRenderer;
                         if (!videoRenderer) continue;
@@ -447,7 +529,7 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
                         }
 
                         const thumbnails = videoRenderer.thumbnail?.thumbnails || [];
-                        const thumbnail = thumbnails.length > 0 
+                        const thumbnail = thumbnails.length > 0
                             ? thumbnails[thumbnails.length - 1].url
                             : `https://i.ytimg.com/vi/${videoRenderer.videoId}/hqdefault.jpg`;
 
@@ -499,6 +581,52 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
     };
 }
 
+async function getVideoFormats(videoId) {
+    try {
+        const credentials = await getInnertubeCredentials();
+        
+        const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${credentials.apiKey}`, {
+            method: 'POST',
+            headers: {
+                ...BROWSER_HEADERS,
+                'Content-Type': 'application/json',
+                'X-YouTube-Client-Name': '1',
+                'X-YouTube-Client-Version': credentials.clientVersion,
+                'Authorization': `${credentials.oauthToken.token_type} ${credentials.oauthToken.access_token}`,
+                'Origin': 'https://www.youtube.com',
+                'Referer': `https://www.youtube.com/watch?v=${videoId}`
+            },
+            body: JSON.stringify({
+                videoId: videoId,
+                context: {
+                    ...credentials.context,
+                    user: {
+                        lockedSafetyMode: false
+                    }
+                },
+                playbackContext: {
+                    contentPlaybackContext: {
+                        signatureTimestamp: credentials.sts,
+                        referer: `https://www.youtube.com/watch?v=${videoId}`
+                    }
+                }
+            })
+        });
+
+        const data = await response.json();
+        
+        if (!data.streamingData) {
+            console.error('No streaming data in response:', data);
+            throw new Error('No streaming data available');
+        }
+
+        return data.streamingData;
+    } catch (error) {
+        console.error('Error getting video formats:', error);
+        throw error;
+    }
+}
+
 app.get('/api/search', async (req, res) => {
     try {
         const { query } = req.query;
@@ -520,7 +648,7 @@ app.get('/api/download', async (req, res) => {
         }
         const downloadInfo = await downloadSong({ youtubeId, title });
         downloads.set(downloadInfo.downloadId, downloadInfo);
-        res.json({ 
+        res.json({
             downloadUrl: `/api/download/${downloadInfo.downloadId}`,
             fileName: downloadInfo.fileName
         });
@@ -543,10 +671,10 @@ app.get('/api/download/:downloadId', (req, res) => {
 app.get('/api/trending', async (req, res) => {
     try {
         const { country = 'US', page = 1 } = req.query;
-        
+
         if (!/^[A-Z]{2}$/.test(country)) {
-            return res.status(400).json({ 
-                error: 'Invalid country code. Please use ISO 3166-1 alpha-2 format (e.g., US, GB, JP)' 
+            return res.status(400).json({
+                error: 'Invalid country code. Please use ISO 3166-1 alpha-2 format (e.g., US, GB, JP)'
             });
         }
 
@@ -559,181 +687,92 @@ app.get('/api/trending', async (req, res) => {
 
 app.get('/api/download-video', async (req, res) => {
     try {
-      const { youtubeId, title, format } = req.query;
-      if (!youtubeId || !title) {
-        return res.status(400).json({ error: 'YouTube ID and title are required' });
-      }
-      const downloadInfo = await downloadVideo({ youtubeId, title }, format);
-      downloads.set(downloadInfo.downloadId, downloadInfo);
-      res.json({ 
-        downloadUrl: `/api/download/${downloadInfo.downloadId}`,
-        fileName: downloadInfo.fileName
-      });
+        const { youtubeId, title, format } = req.query;
+        if (!youtubeId || !title) {
+            return res.status(400).json({ error: 'YouTube ID and title are required' });
+        }
+        const downloadInfo = await downloadVideo({ youtubeId, title }, format);
+        downloads.set(downloadInfo.downloadId, downloadInfo);
+        res.json({
+            downloadUrl: `/api/download/${downloadInfo.downloadId}`,
+            fileName: downloadInfo.fileName
+        });
     } catch (error) {
-      res.status(500).json({ error: error.message });
+        res.status(500).json({ error: error.message });
     }
-  });
+});
 
 // Modify api/video-qualities endpoint
 // In your server.js file, update the /api/video-qualities endpoint:
 app.get('/api/video-qualities', async (req, res) => {
     const { youtubeId } = req.query;
-    
+
     if (!youtubeId) {
         return res.status(400).json({ error: 'YouTube ID is required' });
     }
 
     try {
-        let isResponseSent = false;
-        const process = spawn('yt-dlp', [
-            '-F',
-            `https://youtube.com/watch?v=${youtubeId}`
-        ]);
-  
-        let output = '';
-        let errorOutput = '';
+        const streamingData = await getVideoFormats(youtubeId);
+        
+        // Combine adaptive formats and formats
+        const allFormats = [
+            ...(streamingData.adaptiveFormats || []),
+            ...(streamingData.formats || [])
+        ];
+        
+        // Filter and transform formats
+        const videoFormats = allFormats
+            .filter(format => format.mimeType?.includes('video/mp4'))
+            .map(format => {
+                const quality = format.qualityLabel || 'Unknown';
+                const fps = format.fps || 30;
+                const filesize = format.contentLength 
+                    ? `${(parseInt(format.contentLength) / 1024 / 1024).toFixed(1)}MB` 
+                    : 'Unknown size';
 
-        const timeoutId = setTimeout(() => {
-            if (!isResponseSent) {
-                isResponseSent = true;
-                process.kill();
-                res.status(408).json({ error: 'Request timed out while fetching video formats' });
-            }
-        }, 15000);
+                return {
+                    formatId: format.itag.toString(),
+                    ext: 'mp4',
+                    resolution: `${format.width}x${format.height}`,
+                    filesize,
+                    quality: quality,
+                    fps,
+                    hasAudio: format.mimeType?.includes('audio')
+                };
+            })
+            .sort((a, b) => {
+                const heightA = parseInt(a.resolution.split('x')[1]);
+                const heightB = parseInt(b.resolution.split('x')[1]);
+                return heightB - heightA;
+            });
 
-        process.stdout.on('data', (data) => {
-            output += data.toString();
-        });
+        // Find best audio format
+        const bestAudioFormat = allFormats
+            .filter(format => format.mimeType?.includes('audio/mp4'))
+            .sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate))[0];
 
-        process.stderr.on('data', (data) => {
-            errorOutput += data.toString();
-        });
-  
-        process.on('close', (code) => {
-            clearTimeout(timeoutId);
-            
-            if (isResponseSent) return;
-            isResponseSent = true;
-            
-            if (code !== 0) {
-                return res.status(500).json({ 
-                    error: 'Failed to get video formats',
-                    details: errorOutput 
-                });
-            }
+        // Add audio format ID to video formats that don't have audio
+        const processedFormats = videoFormats.map(format => ({
+            ...format,
+            formatId: format.hasAudio ? format.formatId : `${format.formatId}+${bestAudioFormat.itag}`
+        }));
 
-            // Find the best audio format
-            const audioFormats = output
-                .split('\n')
-                .filter(line => line.includes('audio only') && line.includes('mp4a'));
-            
-            // Get the best audio format ID (usually the last one in the filtered list)
-            const bestAudioFormat = audioFormats.length > 0 ? 
-                audioFormats[audioFormats.length - 1].split(/\s+/)[0] : '140'; // 140 is usually the best audio
+        // Log success for debugging
+        console.log(`Successfully retrieved ${processedFormats.length} formats for video ${youtubeId}`);
 
-            const formats = output
-                .split('\n')
-                .filter(line => {
-                    // Only include lines that start with a number and are mp4 format
-                    if (!line.match(/^[0-9]+\s+mp4/)) return false;
-                    
-                    // Include video formats (both with and without audio)
-                    return line.includes('x');  // Check for resolution
-                })
-                .map(line => {
-                    const parts = line.trim().split(/\s+/);
-                    const formatId = parts[0];
-                    const ext = parts[1];
-                    
-                    const resolutionMatch = line.match(/(\d+x\d+)/);
-                    const resolution = resolutionMatch ? resolutionMatch[1] : '';
-                    
-                    const filesizeMatch = line.match(/(\d+(\.\d+)?[KMG]iB)/);
-                    const filesize = filesizeMatch ? filesizeMatch[1] : 'Unknown size';
-                    
-                    const height = resolution ? resolution.split('x')[1] : '0';
-                    const qualityLabel = `${height}p MP4`;
-
-                    const fpsMatch = line.match(/(\d+)fps/);
-                    const fps = fpsMatch ? fpsMatch[1] : '24';
-                    
-                    // Check if this format includes audio
-                    const hasAudio = !line.includes('video only');
-                    
-                    return {
-                        formatId: hasAudio ? formatId : `${formatId}+${bestAudioFormat}`, // Combine with audio if needed
-                        ext,
-                        resolution,
-                        filesize,
-                        quality: qualityLabel,
-                        fps,
-                        hasAudio
-                    };
-                })
-                .sort((a, b) => {
-                    const heightA = parseInt(a.resolution.split('x')[1]);
-                    const heightB = parseInt(b.resolution.split('x')[1]);
-                    return heightB - heightA;
-                });
-
-            // Filter out duplicate resolutions, keeping the best quality version
-            const uniqueFormats = formats.reduce((acc, current) => {
-                const resolution = current.resolution.split('x')[1];
-                const existing = acc.find(f => f.resolution.split('x')[1] === resolution);
-                
-                if (!existing) {
-                    acc.push(current);
-                }
-                return acc;
-            }, []);
-
-            console.log('Available formats:', uniqueFormats);
-            res.json({ qualities: uniqueFormats });
-        });
-
-        process.on('error', (error) => {
-            if (!isResponseSent) {
-                isResponseSent = true;
-                clearTimeout(timeoutId);
-                res.status(500).json({ error: 'Failed to start yt-dlp process' });
-            }
-        });
-
+        res.json({ qualities: processedFormats });
     } catch (error) {
         console.error('Error in video-qualities endpoint:', error);
-        if (!res.headersSent) {
-            res.status(500).json({ error: error.message });
-        }
+        res.status(500).json({ 
+            error: 'Failed to get video formats',
+            details: error.message,
+            stack: error.stack
+        });
     }
 });
 
-app.get('/api/oauth/status', async (req, res) => {
-    try {
-        const tokenData = await getValidToken();
-        const testResponse = await fetch('https://www.googleapis.com/youtube/v3/channels?part=id&mine=true', {
-            headers: {
-                'Authorization': `${tokenData.token_type} ${tokenData.access_token}`
-            }
-        });
-        
-        if (!testResponse.ok) {
-            throw new Error(`Token validation failed: ${testResponse.status} ${testResponse.statusText}`);
-        }
 
-        const data = await testResponse.json();
-        res.json({ 
-            status: 'valid',
-            tokenExpires: new Date(tokenData.expires * 1000),
-            channelInfo: data
-        });
-    } catch (error) {
-        res.status(500).json({ 
-            status: 'invalid',
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-        });
-    }
-});  
+
 
 app.get('/api/countries', (req, res) => {
     const supportedCountries = [
@@ -748,59 +787,59 @@ app.get('/api/countries', (req, res) => {
         { code: 'BR', name: 'Brazil' },
         { code: 'KR', name: 'South Korea' }
     ];
-    
+
     res.json({ countries: supportedCountries });
 });
 
 app.get('/api/stream/:videoId', async (req, res) => {
     try {
-      const { videoId } = req.params;
-      
-      // Set headers for audio streaming
-      res.setHeader('Content-Type', 'audio/mp3');
-      res.setHeader('Transfer-Encoding', 'chunked');
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Cache-Control', 'no-cache');
-  
-      // Create yt-dlp process for streaming
-      const process = spawn('yt-dlp', [
-        '-f', 'bestaudio[ext=m4a]',
-        '--cookies', COOKIE_FILE,  // Add cookies file
-        '-o', '-',  // Output to stdout
-        '--no-warnings',
-        '--no-playlist',
-        '--quiet',
-        `https://youtube.com/watch?v=${videoId}`
-      ]);
-  
-      // Handle process errors
-      process.on('error', (error) => {
-        console.error('Stream process error:', error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Streaming failed' });
-        }
-      });
-  
-      // Handle stderr
-      process.stderr.on('data', (data) => {
-        console.error(`Stream stderr: ${data}`);
-      });
-  
-      // Pipe the output directly to response
-      process.stdout.pipe(res);
-  
-      // Clean up on client disconnect
-      res.on('close', () => {
-        process.kill();
-      });
-  
+        const { videoId } = req.params;
+
+        // Set headers for audio streaming
+        res.setHeader('Content-Type', 'audio/mp3');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'no-cache');
+
+        // Create yt-dlp process for streaming
+        const process = spawn('yt-dlp', [
+            '-f', 'bestaudio[ext=m4a]',
+            '--cookies', COOKIE_FILE,  // Add cookies file
+            '-o', '-',  // Output to stdout
+            '--no-warnings',
+            '--no-playlist',
+            '--quiet',
+            `https://youtube.com/watch?v=${videoId}`
+        ]);
+
+        // Handle process errors
+        process.on('error', (error) => {
+            console.error('Stream process error:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Streaming failed' });
+            }
+        });
+
+        // Handle stderr
+        process.stderr.on('data', (data) => {
+            console.error(`Stream stderr: ${data}`);
+        });
+
+        // Pipe the output directly to response
+        process.stdout.pipe(res);
+
+        // Clean up on client disconnect
+        res.on('close', () => {
+            process.kill();
+        });
+
     } catch (error) {
-      console.error('Streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: error.message });
-      }
+        console.error('Streaming error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
-  });
+});
 
 process.on('SIGINT', async () => {
     console.log('Cleaning up browser resources...');
@@ -811,7 +850,14 @@ process.on('SIGINT', async () => {
     process.exit();
 });
 
+
 app.listen(port, async () => {
-    await initializeCookies();
     console.log(`Server running at http://localhost:${port}`);
+    try {
+        // Initialize OAuth when server starts
+        await initializeOAuth();
+        console.log('OAuth initialized successfully');
+    } catch (error) {
+        console.error('Failed to initialize OAuth:', error);
+    }
 });

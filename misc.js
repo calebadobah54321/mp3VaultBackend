@@ -4,89 +4,17 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+
 const app = express();
 const port = process.env.PORT || 3002;
-const { COOKIE_FILE, initializeCookies } = require('./cookies');
 
+// OAuth2 credentials
+const CLIENT_ID = '861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com';
+const CLIENT_SECRET = 'SboVhoG9s0rNafixCSGGKXAT';
+const SCOPES = 'http://gdata.youtube.com https://www.googleapis.com/auth/youtube';
 
-app.use(cors());
-app.use(express.json());
-
-
-
-
-
-
-
-
-async function downloadSong(song) {
-    const downloadId = crypto.randomUUID();
-    const safeFileName = `${song.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp3`.substring(0, 200);
-    const outputPath = path.join(OUTPUT_DIR, safeFileName);
-
-    return new Promise((resolve, reject) => {
-        const ytdlpArgs = [
-            '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '0',
-            '--cookies', COOKIE_FILE,  // Use cookies file for authentication
-            '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
-            '--sponsorblock-remove', 'all',
-            '--force-keyframes-at-cuts',
-            '--no-playlist',
-            '--embed-thumbnail',
-            '--no-warnings',
-            '--verbose',
-            `https://youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
-        ];
-
-        const process = spawn('yt-dlp', ytdlpArgs);
-
-        let errorOutput = '';
-        let stdoutOutput = '';
-
-        process.stdout.on('data', (data) => {
-            stdoutOutput += data.toString();
-            console.log('yt-dlp stdout:', data.toString());
-        });
-
-        process.stderr.on('data', (data) => {
-            errorOutput += data.toString();
-            console.error('yt-dlp stderr:', data.toString());
-        });
-
-        const timeout = setTimeout(() => {
-            process.kill();
-            reject(new Error('Download timed out'));
-        }, 5 * 60 * 1000);
-
-        process.on('close', (code) => {
-            clearTimeout(timeout);
-            if (code === 0) {
-                resolve({
-                    downloadId,
-                    fileName: safeFileName,
-                    filePath: outputPath
-                });
-            } else {
-                console.error('yt-dlp failed with code:', code);
-                console.error('Error output:', errorOutput);
-                console.error('Stdout output:', stdoutOutput);
-                reject(new Error(`Download failed (code ${code}): ${errorOutput}`));
-            }
-        });
-
-        process.on('error', (error) => {
-            clearTimeout(timeout);
-            console.error('yt-dlp process error:', error);
-            reject(error);
-        });
-    });
-}
-
-
-
+// Store OAuth tokens
+let oauthTokens = null;
 
 const OUTPUT_DIR = path.join(process.cwd(), 'downloads');
 if (!fs.existsSync(OUTPUT_DIR)) {
@@ -99,9 +27,122 @@ const trendingCache = new Map();
 const CACHE_DURATION = 30 * 60 * 1000;
 const TRENDING_CACHE_DURATION = 15 * 60 * 1000;
 
-let browser;
-const PAGE_POOL = new Map();
-const MAX_RETRIES = 3;
+// OAuth2 initialization function
+async function initializeOAuth() {
+    try {
+        // Start OAuth flow
+        const response = await fetch('https://www.youtube.com/o/oauth2/device/code', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                client_id: CLIENT_ID,
+                scope: SCOPES,
+                device_id: crypto.randomUUID(),
+                device_model: 'ytlr::'
+            })
+        });
+
+        const data = await response.json();
+        
+        console.log('\n=== YouTube OAuth2 Authorization Required ===');
+        console.log(`1. Visit this URL: ${data.verification_url}`);
+        console.log(`2. Enter this code: ${data.user_code}\n`);
+
+        // Poll for token
+        while (true) {
+            try {
+                const tokenResponse = await fetch('https://www.youtube.com/o/oauth2/token', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        client_id: CLIENT_ID,
+                        client_secret: CLIENT_SECRET,
+                        code: data.device_code,
+                        grant_type: 'http://oauth.net/grant_type/device/1.0'
+                    })
+                });
+
+                const tokenData = await tokenResponse.json();
+                
+                if (tokenData.error === 'authorization_pending') {
+                    await new Promise(resolve => setTimeout(resolve, data.interval * 1000));
+                    continue;
+                }
+
+                if (tokenData.error) {
+                    throw new Error(tokenData.error);
+                }
+
+                // Store tokens
+                oauthTokens = {
+                    access_token: tokenData.access_token,
+                    refresh_token: tokenData.refresh_token,
+                    expires: Date.now() + (tokenData.expires_in * 1000),
+                    token_type: tokenData.token_type
+                };
+
+                console.log('Authorization successful! The server is ready to use.\n');
+                return;
+            } catch (error) {
+                if (error.message === 'expired_token') {
+                    console.log('Authorization timed out. Restarting OAuth flow...');
+                    return initializeOAuth();
+                }
+                throw error;
+            }
+        }
+    } catch (error) {
+        console.error('OAuth initialization error:', error);
+        throw error;
+    }
+}
+
+// Helper function to refresh token if needed
+async function ensureValidToken() {
+    if (!oauthTokens) {
+        throw new Error('Not authenticated');
+    }
+
+    if (oauthTokens.expires <= Date.now() + 60000) {
+        try {
+            const response = await fetch('https://www.youtube.com/o/oauth2/token', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    client_id: CLIENT_ID,
+                    client_secret: CLIENT_SECRET,
+                    refresh_token: oauthTokens.refresh_token,
+                    grant_type: 'refresh_token'
+                })
+            });
+
+            const data = await response.json();
+            
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
+            oauthTokens = {
+                access_token: data.access_token,
+                refresh_token: data.refresh_token || oauthTokens.refresh_token,
+                expires: Date.now() + (data.expires_in * 1000),
+                token_type: data.token_type
+            };
+        } catch (error) {
+            console.error('Token refresh error:', error);
+            throw error;
+        }
+    }
+
+    return oauthTokens;
+}
+
 
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -278,16 +319,17 @@ function isValidDuration(duration) {
 }
 
 async function downloadSong(song) {
+    await ensureValidToken();
     const downloadId = crypto.randomUUID();
     const safeFileName = `${song.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp3`.substring(0, 200);
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
 
     return new Promise((resolve, reject) => {
         const process = spawn('yt-dlp', [
+            '--username', 'oauth2',
             '--extract-audio',
             '--audio-format', 'mp3',
             '--audio-quality', '0',
-            '--cookies', COOKIE_FILE,  // Add cookies file
             '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
             '--sponsorblock-remove', 'all',
             '--force-keyframes-at-cuts',
@@ -299,7 +341,6 @@ async function downloadSong(song) {
             '-o', outputPath
         ]);
 
-        // Rest of the function remains the same
         let errorOutput = '';
 
         process.stderr.on('data', (data) => {
@@ -331,26 +372,24 @@ async function downloadSong(song) {
     });
 }
 
+
 async function downloadVideo(video, format) {
+    await ensureValidToken();
     const downloadId = crypto.randomUUID();
     const safeFileName = `${video.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp4`.substring(0, 200);
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
   
     return new Promise((resolve, reject) => {
-        // Basic yt-dlp arguments
         const ytdlpArgs = [
+            '--username', 'oauth2',
             '--no-playlist',
             '--no-warnings',
             '--no-progress',
-            '--cookies', COOKIE_FILE,
-            '-f', format,  // Will handle both single formats and format+audio combinations
+            '-f', format,
             '--merge-output-format', 'mp4',
             '--audio-quality', '0',
             '--add-metadata',
             '--embed-thumbnail',
-            '--add-header', `Authorization: ${tokenData.token_type} ${tokenData.access_token}`,
-            `https://youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
             `https://youtube.com/watch?v=${video.youtubeId}`,
             '-o', outputPath
         ];
@@ -366,7 +405,7 @@ async function downloadVideo(video, format) {
         const timeout = setTimeout(() => {
             process.kill();
             reject(new Error('Download timed out'));
-        }, 10 * 60 * 1000); // 10 minutes timeout for video downloads
+        }, 10 * 60 * 1000);
 
         process.on('close', (code) => {
             clearTimeout(timeout);
@@ -707,33 +746,7 @@ app.get('/api/video-qualities', async (req, res) => {
     }
 });
 
-app.get('/api/oauth/status', async (req, res) => {
-    try {
-        const tokenData = await getValidToken();
-        const testResponse = await fetch('https://www.googleapis.com/youtube/v3/channels?part=id&mine=true', {
-            headers: {
-                'Authorization': `${tokenData.token_type} ${tokenData.access_token}`
-            }
-        });
-        
-        if (!testResponse.ok) {
-            throw new Error(`Token validation failed: ${testResponse.status} ${testResponse.statusText}`);
-        }
-
-        const data = await testResponse.json();
-        res.json({ 
-            status: 'valid',
-            tokenExpires: new Date(tokenData.expires * 1000),
-            channelInfo: data
-        });
-    } catch (error) {
-        res.status(500).json({ 
-            status: 'invalid',
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-        });
-    }
-});  
+  
 
 app.get('/api/countries', (req, res) => {
     const supportedCountries = [
@@ -812,6 +825,12 @@ process.on('SIGINT', async () => {
 });
 
 app.listen(port, async () => {
-    await initializeCookies();
     console.log(`Server running at http://localhost:${port}`);
+    
+    try {
+        await initializeOAuth();
+    } catch (error) {
+        console.error('Failed to initialize OAuth:', error);
+        process.exit(1);
+    }
 });
