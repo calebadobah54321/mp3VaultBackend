@@ -4,7 +4,12 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const app = express();
+const port = process.env.PORT || 3002;
 
+
+app.use(cors());
+app.use(express.json());
 // Enhanced headers to better mimic a real browser
 const BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
