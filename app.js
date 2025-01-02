@@ -4,8 +4,9 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const COOKIE_FILE = process.env.COOKIE_FILE || path.join(process.cwd(), 'cookies.txt');
 
-// Add near the top of your file
+// Move this block after COOKIE_FILE is defined
 if (process.env.YOUTUBE_COOKIES) {
     fs.writeFileSync(COOKIE_FILE, process.env.YOUTUBE_COOKIES);
     console.log('Created cookies file from environment variable');
@@ -13,7 +14,7 @@ if (process.env.YOUTUBE_COOKIES) {
 
 const app = express();
 const port = process.env.PORT || 3002;
-const COOKIE_FILE = process.env.COOKIE_FILE || path.join(process.cwd(), 'cookies.txt');
+
 
 app.use(cors());
 app.use(express.json());
