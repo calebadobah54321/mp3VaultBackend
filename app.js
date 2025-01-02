@@ -5,46 +5,55 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const app = express();
-const port = process.env.PORT || 3002;
+// Enhanced headers to better mimic a real browser
+const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0'
+};
 
-app.use(cors());
-app.use(express.json());
-
-const OUTPUT_DIR = path.join(process.cwd(), 'downloads');
-if (!fs.existsSync(OUTPUT_DIR)) {
-    fs.mkdirSync(OUTPUT_DIR);
-}
-
-// New function to get Innertube credentials
 async function getInnertubeCredentials() {
     try {
-        const response = await fetch('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
+        // First, get the base YouTube page to get the initial context and consent cookie
+        const initialResponse = await fetch('https://www.youtube.com', {
+            headers: BROWSER_HEADERS
         });
-        const html = await response.text();
-        
-        // Extract INNERTUBE_API_KEY
-        const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
-        const apiKey = apiKeyMatch ? apiKeyMatch[1] : '';
-        
-        // Extract client version
-        const clientVersionMatch = html.match(/"clientVersion":"([^"]+)"/);
-        const clientVersion = clientVersionMatch ? clientVersionMatch[1] : '';
-        
-        // Get visitor data
-        const visitorDataMatch = html.match(/"visitorData":"([^"]+)"/);
-        const visitorData = visitorDataMatch ? visitorDataMatch[1] : '';
 
-        return { apiKey, clientVersion, visitorData };
+        const cookies = initialResponse.headers.get('set-cookie');
+        const html = await initialResponse.text();
+
+        // Extract required tokens
+        const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
+        const clientVersionMatch = html.match(/"clientVersion":"([^"]+)"/);
+        const visitorDataMatch = html.match(/"visitorData":"([^"]+)"/);
+        const contextMatch = html.match(/"INNERTUBE_CONTEXT":({[^}]+})/);
+
+        if (!apiKeyMatch) {
+            throw new Error('Failed to extract API key');
+        }
+
+        const credentials = {
+            apiKey: apiKeyMatch[1],
+            clientVersion: clientVersionMatch ? clientVersionMatch[1] : '2.20240101.00.00',
+            visitorData: visitorDataMatch ? visitorDataMatch[1] : '',
+            context: contextMatch ? JSON.parse(contextMatch[1]) : null,
+            cookies: cookies
+        };
+
+        return credentials;
     } catch (error) {
-        console.error('Error getting Innertube credentials:', error);
-        return null;
+        console.error('Error in getInnertubeCredentials:', error);
+        throw error;
     }
 }
-
 
 const downloads = new Map();
 const searchCache = new Map();
@@ -451,28 +460,67 @@ async function getVideoFormats(videoId) {
         const credentials = await getInnertubeCredentials();
         if (!credentials) throw new Error('Failed to get credentials');
 
+        // Get initial video page first
+        const videoPageResponse = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+            headers: {
+                ...BROWSER_HEADERS,
+                Cookie: credentials.cookies || ''
+            }
+        });
+
+        const videoPageHtml = await videoPageResponse.text();
+        
+        // Extract additional context from video page
+        const ytcfgMatch = videoPageHtml.match(/ytcfg\.set\(({[^}]+})\)/);
+        const ytcfg = ytcfgMatch ? JSON.parse(ytcfgMatch[1]) : {};
+
+        // Make the actual API request
         const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${credentials.apiKey}`, {
             method: 'POST',
             headers: {
+                ...BROWSER_HEADERS,
                 'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'X-YouTube-Client-Name': '1',
-                'X-YouTube-Client-Version': credentials.clientVersion
+                'X-YouTube-Client-Version': credentials.clientVersion,
+                'Origin': 'https://www.youtube.com',
+                'Referer': `https://www.youtube.com/watch?v=${videoId}`,
+                'Cookie': credentials.cookies || ''
             },
             body: JSON.stringify({
                 videoId: videoId,
                 context: {
                     client: {
-                        clientName: 'WEB',
+                        hl: "en",
+                        gl: "US",
+                        clientName: "WEB",
                         clientVersion: credentials.clientVersion,
-                        visitorData: credentials.visitorData
+                        originalUrl: `https://www.youtube.com/watch?v=${videoId}`,
+                        platform: "DESKTOP",
+                        visitorData: credentials.visitorData,
+                    },
+                    user: {
+                        lockedSafetyMode: false
+                    },
+                    request: {
+                        useSsl: true,
+                        internalExperimentFlags: [],
+                        consistencyTokenJars: []
+                    }
+                },
+                playbackContext: {
+                    contentPlaybackContext: {
+                        signatureTimestamp: ytcfg.STS || Math.floor(Date.now() / 1000)
                     }
                 }
             })
         });
 
         const data = await response.json();
-        if (!data.streamingData) throw new Error('No streaming data available');
+        
+        if (!data.streamingData) {
+            console.error('No streaming data in response:', data);
+            throw new Error('No streaming data available');
+        }
 
         return data.streamingData;
     } catch (error) {
@@ -569,7 +617,10 @@ app.get('/api/video-qualities', async (req, res) => {
         const streamingData = await getVideoFormats(youtubeId);
         
         // Combine adaptive formats and formats
-        const allFormats = [...(streamingData.adaptiveFormats || []), ...(streamingData.formats || [])];
+        const allFormats = [
+            ...(streamingData.adaptiveFormats || []),
+            ...(streamingData.formats || [])
+        ];
         
         // Filter and transform formats
         const videoFormats = allFormats
@@ -608,15 +659,20 @@ app.get('/api/video-qualities', async (req, res) => {
             formatId: format.hasAudio ? format.formatId : `${format.formatId}+${bestAudioFormat.itag}`
         }));
 
+        // Log success for debugging
+        console.log(`Successfully retrieved ${processedFormats.length} formats for video ${youtubeId}`);
+
         res.json({ qualities: processedFormats });
     } catch (error) {
         console.error('Error in video-qualities endpoint:', error);
         res.status(500).json({ 
             error: 'Failed to get video formats',
-            details: error.message
+            details: error.message,
+            stack: error.stack
         });
     }
 });
+
 
 
 
