@@ -22,24 +22,43 @@ const BROWSER_HEADERS = {
     'Sec-Fetch-Mode': 'navigate',
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
-    'Cache-Control': 'max-age=0'
+    'Cache-Control': 'max-age=0',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"'
 };
+
+const OUTPUT_DIR= path.join(__dirname, 'downloads');
 
 async function getInnertubeCredentials() {
     try {
-        // First, get the base YouTube page to get the initial context and consent cookie
+        console.log('Fetching YouTube page...');
         const initialResponse = await fetch('https://www.youtube.com', {
             headers: BROWSER_HEADERS
         });
 
+        if (!initialResponse.ok) {
+            console.error(`YouTube page fetch failed with status: ${initialResponse.status}`);
+            throw new Error(`Failed to fetch YouTube page: ${initialResponse.status}`);
+        }
+
         const cookies = initialResponse.headers.get('set-cookie');
         const html = await initialResponse.text();
 
-        // Extract required tokens
+        // Extract API key directly
         const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
         const clientVersionMatch = html.match(/"clientVersion":"([^"]+)"/);
         const visitorDataMatch = html.match(/"visitorData":"([^"]+)"/);
-        const contextMatch = html.match(/"INNERTUBE_CONTEXT":({[^}]+})/);
+        
+        // Extract STS (signature timestamp)
+        const stsMatch = html.match(/"signatureTimestamp":(\d+)/);
+        
+        console.log('Extracted matches:', {
+            apiKey: !!apiKeyMatch,
+            clientVersion: !!clientVersionMatch,
+            visitorData: !!visitorDataMatch,
+            sts: !!stsMatch
+        });
 
         if (!apiKeyMatch) {
             throw new Error('Failed to extract API key');
@@ -47,10 +66,20 @@ async function getInnertubeCredentials() {
 
         const credentials = {
             apiKey: apiKeyMatch[1],
-            clientVersion: clientVersionMatch ? clientVersionMatch[1] : '2.20240101.00.00',
-            visitorData: visitorDataMatch ? visitorDataMatch[1] : '',
-            context: contextMatch ? JSON.parse(contextMatch[1]) : null,
-            cookies: cookies
+            clientVersion: clientVersionMatch?.[1] || '2.20240101.00.00',
+            visitorData: visitorDataMatch?.[1] || '',
+            sts: stsMatch?.[1] || Math.floor(Date.now() / 1000).toString(),
+            context: {
+                client: {
+                    hl: "en",
+                    gl: "US",
+                    clientName: "WEB",
+                    clientVersion: clientVersionMatch?.[1] || '2.20240101.00.00',
+                    originalUrl: "https://www.youtube.com",
+                    platform: "DESKTOP"
+                }
+            },
+            cookies: cookies || ''
         };
 
         return credentials;
@@ -462,24 +491,22 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
 
 async function getVideoFormats(videoId) {
     try {
+        console.log('Getting credentials for video:', videoId);
         const credentials = await getInnertubeCredentials();
-        if (!credentials) throw new Error('Failed to get credentials');
-
-        // Get initial video page first
+        
+        // First get consent cookie and any other required cookies
+        console.log('Fetching video page for initial cookies...');
         const videoPageResponse = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
             headers: {
                 ...BROWSER_HEADERS,
-                Cookie: credentials.cookies || ''
+                'Cookie': credentials.cookies
             }
         });
 
-        const videoPageHtml = await videoPageResponse.text();
-        
-        // Extract additional context from video page
-        const ytcfgMatch = videoPageHtml.match(/ytcfg\.set\(({[^}]+})\)/);
-        const ytcfg = ytcfgMatch ? JSON.parse(ytcfgMatch[1]) : {};
+        const additionalCookies = videoPageResponse.headers.get('set-cookie');
+        const allCookies = [credentials.cookies, additionalCookies].filter(Boolean).join('; ');
 
-        // Make the actual API request
+        console.log('Making API request for video formats...');
         const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${credentials.apiKey}`, {
             method: 'POST',
             headers: {
@@ -489,19 +516,17 @@ async function getVideoFormats(videoId) {
                 'X-YouTube-Client-Version': credentials.clientVersion,
                 'Origin': 'https://www.youtube.com',
                 'Referer': `https://www.youtube.com/watch?v=${videoId}`,
-                'Cookie': credentials.cookies || ''
+                'Cookie': allCookies
             },
             body: JSON.stringify({
                 videoId: videoId,
                 context: {
                     client: {
-                        hl: "en",
-                        gl: "US",
-                        clientName: "WEB",
-                        clientVersion: credentials.clientVersion,
+                        ...credentials.context.client,
                         originalUrl: `https://www.youtube.com/watch?v=${videoId}`,
-                        platform: "DESKTOP",
-                        visitorData: credentials.visitorData,
+                        mainAppWebInfo: {
+                            graftUrl: `/watch?v=${videoId}`
+                        }
                     },
                     user: {
                         lockedSafetyMode: false
@@ -514,13 +539,20 @@ async function getVideoFormats(videoId) {
                 },
                 playbackContext: {
                     contentPlaybackContext: {
-                        signatureTimestamp: ytcfg.STS || Math.floor(Date.now() / 1000)
+                        signatureTimestamp: credentials.sts,
+                        referer: `https://www.youtube.com/watch?v=${videoId}`
                     }
                 }
             })
         });
 
         const data = await response.json();
+        console.log('API Response status:', data.playabilityStatus?.status);
+        
+        if (data.playabilityStatus?.status === 'LOGIN_REQUIRED') {
+            console.log('Login required, full response:', JSON.stringify(data, null, 2));
+            throw new Error('Video requires login - bot detection triggered');
+        }
         
         if (!data.streamingData) {
             console.error('No streaming data in response:', data);
