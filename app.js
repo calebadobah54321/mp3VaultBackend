@@ -8,6 +8,7 @@ const app = express();
 const port = process.env.PORT || 3002;
 
 
+
 app.use(cors());
 app.use(express.json());
 // Enhanced headers to better mimic a real browser
@@ -106,7 +107,7 @@ const HEADERS = {
     'Referer': 'https://www.youtube.com/',
 };
 
-
+const COOKIE_FILE = path.join(__dirname, 'cookies.txt');
 
 
 
