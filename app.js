@@ -5,10 +5,15 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-
+// Add near the top of your file
+if (process.env.YOUTUBE_COOKIES) {
+    fs.writeFileSync(COOKIE_FILE, process.env.YOUTUBE_COOKIES);
+    console.log('Created cookies file from environment variable');
+}
 
 const app = express();
 const port = process.env.PORT || 3002;
+const COOKIE_FILE = process.env.COOKIE_FILE || path.join(process.cwd(), 'cookies.txt');
 
 app.use(cors());
 app.use(express.json());
@@ -212,6 +217,7 @@ async function downloadSong(song) {
             '--extract-audio',
             '--audio-format', 'mp3',
             '--audio-quality', '0',
+            '--cookies', COOKIE_FILE,  // Add cookies file
             '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
             '--sponsorblock-remove', 'all',
             '--force-keyframes-at-cuts',
@@ -223,6 +229,7 @@ async function downloadSong(song) {
             '-o', outputPath
         ]);
 
+        // Rest of the function remains the same
         let errorOutput = '';
 
         process.stderr.on('data', (data) => {
@@ -265,6 +272,7 @@ async function downloadVideo(video, format) {
             '--no-playlist',
             '--no-warnings',
             '--no-progress',
+            '--cookies', COOKIE_FILE,
             '-f', format,  // Will handle both single formats and format+audio combinations
             '--merge-output-format', 'mp4',
             '--audio-quality', '0',
@@ -658,6 +666,7 @@ app.get('/api/stream/:videoId', async (req, res) => {
       // Create yt-dlp process for streaming
       const process = spawn('yt-dlp', [
         '-f', 'bestaudio[ext=m4a]',
+        '--cookies', COOKIE_FILE,  // Add cookies file
         '-o', '-',  // Output to stdout
         '--no-warnings',
         '--no-playlist',
