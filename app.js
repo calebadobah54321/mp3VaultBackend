@@ -4,12 +4,33 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const COOKIE_FILE = process.env.COOKIE_FILE || path.join(process.cwd(), 'cookies.txt');
 
-// Move this block after COOKIE_FILE is defined
-if (process.env.YOUTUBE_COOKIES) {
-    fs.writeFileSync(COOKIE_FILE, process.env.YOUTUBE_COOKIES);
-    console.log('Created cookies file from environment variable');
+// Define cookie file path
+const COOKIE_FILE = path.join(process.cwd(), 'cookies.txt');
+
+// Create cookies.txt with the proper format
+const cookieContent = `# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+.youtube.com	TRUE	/	TRUE	1735345148	LOGIN_INFO	AFmmF2swRQIgWkGRAO-8y74EARWqOPWylwUwPd6J4nTwmdIKZxXK0nYCIQC8YCRGJvt-Y6AgiAIY3PljJqtUDIhbByMtwH44yOJlfQ:QUQ3MjNmdzlUUVRrYnBETERBekxWRm14RFN0clpKVHFFUHBZVnFmOG13UmZvNElMZm5Zd3JWMXRFUzcxcW9tbWk1RVJrNVpDSmh2WWNRN3p4RUk1enplXzNISUl3RHJ3LV9wcTE1YlZsekhtWEM2OGhpSE5FTGM0WklSYmExaVBvaFpMWUZrTjVJX0dmRXdhdS1icXhmU0kyREJSUm91aWR3
+.youtube.com	TRUE	/	TRUE	1735345148	VISITOR_INFO1_LIVE	-slN8Cx96y4
+.youtube.com	TRUE	/	TRUE	1735345148	VISITOR_PRIVACY_METADATA	CgJHSBIEGgAgZw%3D%3D
+.youtube.com	TRUE	/	TRUE	1735345148	PREF	f4=4000000&f6=40000000&tz=America.New_York&f7=100&repeat=NONE&autoplay=true
+.youtube.com	TRUE	/	TRUE	1735345148	YSC	P5X2xrjrI-Y
+.youtube.com	TRUE	/	TRUE	1735345148	HSID	AWPc_c-vkn0deXHPv
+.youtube.com	TRUE	/	TRUE	1735345148	SSID	AFumJZWZyFTZkhW-i
+.youtube.com	TRUE	/	TRUE	1735345148	APISID	iVzmlPoy-qHHMnzX/AMKGcd2wImZL6zDo0
+.youtube.com	TRUE	/	TRUE	1735345148	SAPISID	i6ppnGdP5nvAXiXX/AP7ZdmyhvGvPHLCZv
+.youtube.com	TRUE	/	TRUE	1735345148	SID	g.a000rwjZh3edwQXASRlsJE7dmSj2mVXS24ixj9IPeO_XYXmPj7cS_e_EcCvhGgoZ1HUC-eA9TQACgYKATYSARISFQHGX2MiFlNqhObIl4emgPRUmPVldBoVAUF8yKqjt9bnLIOH9rTR33Z9uVWo0076
+.youtube.com	TRUE	/	TRUE	1735345148	SIDCC	AKEyXzUMm7jiovdGlx4Q1uAOfdd-WpiLd3r9f4HnUo2Wu5SXK3LWQBqooNS67awJDxh5iBqW3zo`;
+
+// Create the cookies file when server starts
+try {
+    fs.writeFileSync(COOKIE_FILE, cookieContent);
+    console.log('Created cookies file successfully');
+} catch (error) {
+    console.error('Error creating cookies file:', error);
 }
 
 const app = express();
@@ -48,7 +69,7 @@ const HEADERS = {
 async function searchSongs(query) {
     const cacheKey = query.toLowerCase();
     const cachedResult = searchCache.get(cacheKey);
-    
+
     if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_DURATION) {
         return cachedResult.results;
     }
@@ -57,7 +78,7 @@ async function searchSongs(query) {
         // Make two searches: one for audio, one for music videos
         const audioQuery = encodeURIComponent(query + ' audio');
         const videoQuery = encodeURIComponent(query);
-        
+
         // Search URLs for both types
         const audioUrl = `https://www.youtube.com/results?search_query=${audioQuery}&sp=EgIQAQ%253D%253D`;
         const videoUrl = `https://www.youtube.com/results?search_query=${videoQuery}&sp=EgIQAUICCAE%253D`;
@@ -118,16 +139,16 @@ async function processSearchResults(html, isAudioSearch) {
         const viewCountText = videoRenderer.viewCountText?.simpleText || '0 views';
         const channelName = videoRenderer.ownerText?.runs[0]?.text || 'Unknown Channel';
         const thumbnails = videoRenderer.thumbnail?.thumbnails || [];
-        const thumbnail = thumbnails.length > 0 
+        const thumbnail = thumbnails.length > 0
             ? thumbnails[thumbnails.length - 1].url
             : `https://i.ytimg.com/vi/${videoRenderer.videoId}/hqdefault.jpg`;
 
         // Check for official music video indicators
         const isOfficialVideo = videoRenderer.title?.runs[0]?.text?.toLowerCase().includes('official') ||
-                              videoRenderer.title?.runs[0]?.text?.toLowerCase().includes('music video') ||
-                              videoRenderer.ownerBadges?.some(badge => 
-                                badge?.metadataBadgeRenderer?.tooltip === 'Official Artist Channel'
-                              );
+            videoRenderer.title?.runs[0]?.text?.toLowerCase().includes('music video') ||
+            videoRenderer.ownerBadges?.some(badge =>
+                badge?.metadataBadgeRenderer?.tooltip === 'Official Artist Channel'
+            );
 
         results.push({
             title: videoRenderer.title.runs[0].text,
@@ -190,10 +211,10 @@ function mergeAndDeduplicateResults(audioResults, videoResults) {
 }
 
 function isLiveStream(videoRenderer) {
-    return videoRenderer?.badges?.some(badge => 
-        badge?.liveBroadcastBadge || 
+    return videoRenderer?.badges?.some(badge =>
+        badge?.liveBroadcastBadge ||
         (badge?.labelBadge?.label === 'LIVE')
-    ) || videoRenderer?.thumbnailOverlays?.some(overlay => 
+    ) || videoRenderer?.thumbnailOverlays?.some(overlay =>
         overlay?.thumbnailOverlayTimeStatusRenderer?.text?.simpleText === 'LIVE'
     );
 }
@@ -266,7 +287,7 @@ async function downloadVideo(video, format) {
     const downloadId = crypto.randomUUID();
     const safeFileName = `${video.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp4`.substring(0, 200);
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
-  
+
     return new Promise((resolve, reject) => {
         // Basic yt-dlp arguments
         const ytdlpArgs = [
@@ -328,15 +349,15 @@ const allVideosCache = new Map();
 
 async function getTrendingSongs(countryCode = 'US', page = 1) {
     const cacheKey = countryCode.toUpperCase();
-    
+
     // Try to get all videos from cache first
     let allVideos = allVideosCache.get(cacheKey)?.videos;
     const cacheTimestamp = allVideosCache.get(cacheKey)?.timestamp;
 
     // Check if we need to fetch fresh data
-    const needsFresh = !allVideos || 
-                      !cacheTimestamp || 
-                      (Date.now() - cacheTimestamp > TRENDING_CACHE_DURATION);
+    const needsFresh = !allVideos ||
+        !cacheTimestamp ||
+        (Date.now() - cacheTimestamp > TRENDING_CACHE_DURATION);
 
     if (needsFresh) {
         try {
@@ -351,7 +372,7 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
 
             const html = await response.text();
             const initialDataMatch = html.match(/var ytInitialData = (.+?);<\/script>/);
-            
+
             if (!initialDataMatch) {
                 throw new Error('Could not find initial data');
             }
@@ -364,7 +385,7 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
                 const tabContent = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
                 for (const section of tabContent) {
                     const items = section?.itemSectionRenderer?.contents?.[0]?.shelfRenderer?.content?.expandedShelfContentsRenderer?.items || [];
-                    
+
                     for (const item of items) {
                         const videoRenderer = item.videoRenderer;
                         if (!videoRenderer) continue;
@@ -375,7 +396,7 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
                         }
 
                         const thumbnails = videoRenderer.thumbnail?.thumbnails || [];
-                        const thumbnail = thumbnails.length > 0 
+                        const thumbnail = thumbnails.length > 0
                             ? thumbnails[thumbnails.length - 1].url
                             : `https://i.ytimg.com/vi/${videoRenderer.videoId}/hqdefault.jpg`;
 
@@ -448,7 +469,7 @@ app.get('/api/download', async (req, res) => {
         }
         const downloadInfo = await downloadSong({ youtubeId, title });
         downloads.set(downloadInfo.downloadId, downloadInfo);
-        res.json({ 
+        res.json({
             downloadUrl: `/api/download/${downloadInfo.downloadId}`,
             fileName: downloadInfo.fileName
         });
@@ -471,10 +492,10 @@ app.get('/api/download/:downloadId', (req, res) => {
 app.get('/api/trending', async (req, res) => {
     try {
         const { country = 'US', page = 1 } = req.query;
-        
+
         if (!/^[A-Z]{2}$/.test(country)) {
-            return res.status(400).json({ 
-                error: 'Invalid country code. Please use ISO 3166-1 alpha-2 format (e.g., US, GB, JP)' 
+            return res.status(400).json({
+                error: 'Invalid country code. Please use ISO 3166-1 alpha-2 format (e.g., US, GB, JP)'
             });
         }
 
@@ -487,26 +508,26 @@ app.get('/api/trending', async (req, res) => {
 
 app.get('/api/download-video', async (req, res) => {
     try {
-      const { youtubeId, title, format } = req.query;
-      if (!youtubeId || !title) {
-        return res.status(400).json({ error: 'YouTube ID and title are required' });
-      }
-      const downloadInfo = await downloadVideo({ youtubeId, title }, format);
-      downloads.set(downloadInfo.downloadId, downloadInfo);
-      res.json({ 
-        downloadUrl: `/api/download/${downloadInfo.downloadId}`,
-        fileName: downloadInfo.fileName
-      });
+        const { youtubeId, title, format } = req.query;
+        if (!youtubeId || !title) {
+            return res.status(400).json({ error: 'YouTube ID and title are required' });
+        }
+        const downloadInfo = await downloadVideo({ youtubeId, title }, format);
+        downloads.set(downloadInfo.downloadId, downloadInfo);
+        res.json({
+            downloadUrl: `/api/download/${downloadInfo.downloadId}`,
+            fileName: downloadInfo.fileName
+        });
     } catch (error) {
-      res.status(500).json({ error: error.message });
+        res.status(500).json({ error: error.message });
     }
-  });
+});
 
 // Modify api/video-qualities endpoint
 // In your server.js file, update the /api/video-qualities endpoint:
 app.get('/api/video-qualities', async (req, res) => {
     const { youtubeId } = req.query;
-    
+
     if (!youtubeId) {
         return res.status(400).json({ error: 'YouTube ID is required' });
     }
@@ -517,7 +538,7 @@ app.get('/api/video-qualities', async (req, res) => {
             '-F',
             `https://youtube.com/watch?v=${youtubeId}`
         ]);
-  
+
         let output = '';
         let errorOutput = '';
 
@@ -536,17 +557,17 @@ app.get('/api/video-qualities', async (req, res) => {
         process.stderr.on('data', (data) => {
             errorOutput += data.toString();
         });
-  
+
         process.on('close', (code) => {
             clearTimeout(timeoutId);
-            
+
             if (isResponseSent) return;
             isResponseSent = true;
-            
+
             if (code !== 0) {
-                return res.status(500).json({ 
+                return res.status(500).json({
                     error: 'Failed to get video formats',
-                    details: errorOutput 
+                    details: errorOutput
                 });
             }
 
@@ -554,9 +575,9 @@ app.get('/api/video-qualities', async (req, res) => {
             const audioFormats = output
                 .split('\n')
                 .filter(line => line.includes('audio only') && line.includes('mp4a'));
-            
+
             // Get the best audio format ID (usually the last one in the filtered list)
-            const bestAudioFormat = audioFormats.length > 0 ? 
+            const bestAudioFormat = audioFormats.length > 0 ?
                 audioFormats[audioFormats.length - 1].split(/\s+/)[0] : '140'; // 140 is usually the best audio
 
             const formats = output
@@ -564,7 +585,7 @@ app.get('/api/video-qualities', async (req, res) => {
                 .filter(line => {
                     // Only include lines that start with a number and are mp4 format
                     if (!line.match(/^[0-9]+\s+mp4/)) return false;
-                    
+
                     // Include video formats (both with and without audio)
                     return line.includes('x');  // Check for resolution
                 })
@@ -572,22 +593,22 @@ app.get('/api/video-qualities', async (req, res) => {
                     const parts = line.trim().split(/\s+/);
                     const formatId = parts[0];
                     const ext = parts[1];
-                    
+
                     const resolutionMatch = line.match(/(\d+x\d+)/);
                     const resolution = resolutionMatch ? resolutionMatch[1] : '';
-                    
+
                     const filesizeMatch = line.match(/(\d+(\.\d+)?[KMG]iB)/);
                     const filesize = filesizeMatch ? filesizeMatch[1] : 'Unknown size';
-                    
+
                     const height = resolution ? resolution.split('x')[1] : '0';
                     const qualityLabel = `${height}p MP4`;
 
                     const fpsMatch = line.match(/(\d+)fps/);
                     const fps = fpsMatch ? fpsMatch[1] : '24';
-                    
+
                     // Check if this format includes audio
                     const hasAudio = !line.includes('video only');
-                    
+
                     return {
                         formatId: hasAudio ? formatId : `${formatId}+${bestAudioFormat}`, // Combine with audio if needed
                         ext,
@@ -608,7 +629,7 @@ app.get('/api/video-qualities', async (req, res) => {
             const uniqueFormats = formats.reduce((acc, current) => {
                 const resolution = current.resolution.split('x')[1];
                 const existing = acc.find(f => f.resolution.split('x')[1] === resolution);
-                
+
                 if (!existing) {
                     acc.push(current);
                 }
@@ -635,7 +656,7 @@ app.get('/api/video-qualities', async (req, res) => {
     }
 });
 
-  
+
 
 app.get('/api/countries', (req, res) => {
     const supportedCountries = [
@@ -650,59 +671,59 @@ app.get('/api/countries', (req, res) => {
         { code: 'BR', name: 'Brazil' },
         { code: 'KR', name: 'South Korea' }
     ];
-    
+
     res.json({ countries: supportedCountries });
 });
 
 app.get('/api/stream/:videoId', async (req, res) => {
     try {
-      const { videoId } = req.params;
-      
-      // Set headers for audio streaming
-      res.setHeader('Content-Type', 'audio/mp3');
-      res.setHeader('Transfer-Encoding', 'chunked');
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Cache-Control', 'no-cache');
-  
-      // Create yt-dlp process for streaming
-      const process = spawn('yt-dlp', [
-        '-f', 'bestaudio[ext=m4a]',
-        '--cookies', COOKIE_FILE,  // Add cookies file
-        '-o', '-',  // Output to stdout
-        '--no-warnings',
-        '--no-playlist',
-        '--quiet',
-        `https://youtube.com/watch?v=${videoId}`
-      ]);
-  
-      // Handle process errors
-      process.on('error', (error) => {
-        console.error('Stream process error:', error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Streaming failed' });
-        }
-      });
-  
-      // Handle stderr
-      process.stderr.on('data', (data) => {
-        console.error(`Stream stderr: ${data}`);
-      });
-  
-      // Pipe the output directly to response
-      process.stdout.pipe(res);
-  
-      // Clean up on client disconnect
-      res.on('close', () => {
-        process.kill();
-      });
-  
+        const { videoId } = req.params;
+
+        // Set headers for audio streaming
+        res.setHeader('Content-Type', 'audio/mp3');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'no-cache');
+
+        // Create yt-dlp process for streaming
+        const process = spawn('yt-dlp', [
+            '-f', 'bestaudio[ext=m4a]',
+            '--cookies', COOKIE_FILE,  // Add cookies file
+            '-o', '-',  // Output to stdout
+            '--no-warnings',
+            '--no-playlist',
+            '--quiet',
+            `https://youtube.com/watch?v=${videoId}`
+        ]);
+
+        // Handle process errors
+        process.on('error', (error) => {
+            console.error('Stream process error:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Streaming failed' });
+            }
+        });
+
+        // Handle stderr
+        process.stderr.on('data', (data) => {
+            console.error(`Stream stderr: ${data}`);
+        });
+
+        // Pipe the output directly to response
+        process.stdout.pipe(res);
+
+        // Clean up on client disconnect
+        res.on('close', () => {
+            process.kill();
+        });
+
     } catch (error) {
-      console.error('Streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: error.message });
-      }
+        console.error('Streaming error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
-  });
+});
 
 process.on('SIGINT', async () => {
     console.log('Cleaning up browser resources...');
