@@ -8,6 +8,12 @@ const app = express();
 const port = process.env.PORT || 3002;
 const COOKIE_FILE = path.join(process.cwd(), 'cookies.txt');
 
+if (fs.existsSync(COOKIE_FILE)) {
+    console.error(`Cookie found at: ${COOKIE_FILE}`);
+    // You can either throw an error or continue without cookies
+    // process.exit(1); // Uncomment this if you want to stop the server when cookies are missing
+}
+
 app.use(cors());
 app.use(express.json());
 // OAuth2 Constants
@@ -156,33 +162,45 @@ async function getValidToken() {
     return tokenData;
 }
 
+
+
+
+
 async function downloadSong(song) {
-    const tokenData = await getValidToken();
     const downloadId = crypto.randomUUID();
     const safeFileName = `${song.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp3`.substring(0, 200);
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
 
     return new Promise((resolve, reject) => {
-        const process = spawn('yt-dlp', [
+        const ytdlpArgs = [
             '--extract-audio',
             '--audio-format', 'mp3',
             '--audio-quality', '0',
+            '--cookies', COOKIE_FILE,  // Use cookies file for authentication
             '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
             '--sponsorblock-remove', 'all',
             '--force-keyframes-at-cuts',
             '--no-playlist',
             '--embed-thumbnail',
             '--no-warnings',
-            '--no-progress',
-            '--add-header', `Authorization: ${tokenData.token_type} ${tokenData.access_token}`,
+            '--verbose',
             `https://youtube.com/watch?v=${song.youtubeId}`,
             '-o', outputPath
-        ]);
+        ];
+
+        const process = spawn('yt-dlp', ytdlpArgs);
 
         let errorOutput = '';
+        let stdoutOutput = '';
+
+        process.stdout.on('data', (data) => {
+            stdoutOutput += data.toString();
+            console.log('yt-dlp stdout:', data.toString());
+        });
 
         process.stderr.on('data', (data) => {
             errorOutput += data.toString();
+            console.error('yt-dlp stderr:', data.toString());
         });
 
         const timeout = setTimeout(() => {
@@ -199,12 +217,16 @@ async function downloadSong(song) {
                     filePath: outputPath
                 });
             } else {
-                reject(new Error(`Download failed: ${errorOutput}`));
+                console.error('yt-dlp failed with code:', code);
+                console.error('Error output:', errorOutput);
+                console.error('Stdout output:', stdoutOutput);
+                reject(new Error(`Download failed (code ${code}): ${errorOutput}`));
             }
         });
 
         process.on('error', (error) => {
             clearTimeout(timeout);
+            console.error('yt-dlp process error:', error);
             reject(error);
         });
     });
@@ -832,7 +854,33 @@ app.get('/api/video-qualities', async (req, res) => {
     }
 });
 
-  
+app.get('/api/oauth/status', async (req, res) => {
+    try {
+        const tokenData = await getValidToken();
+        const testResponse = await fetch('https://www.googleapis.com/youtube/v3/channels?part=id&mine=true', {
+            headers: {
+                'Authorization': `${tokenData.token_type} ${tokenData.access_token}`
+            }
+        });
+        
+        if (!testResponse.ok) {
+            throw new Error(`Token validation failed: ${testResponse.status} ${testResponse.statusText}`);
+        }
+
+        const data = await testResponse.json();
+        res.json({ 
+            status: 'valid',
+            tokenExpires: new Date(tokenData.expires * 1000),
+            channelInfo: data
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'invalid',
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});  
 
 app.get('/api/countries', (req, res) => {
     const supportedCountries = [
