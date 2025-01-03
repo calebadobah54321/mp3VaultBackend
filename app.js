@@ -8,16 +8,20 @@ const app = express();
 const port = process.env.PORT || 3002;
 const { COOKIE_FILE, initializeCookies } = require('./cookies');
 
-
 app.use(cors());
 app.use(express.json());
 
+const OUTPUT_DIR = path.join(process.cwd(), 'downloads');
+if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR);
+}
 
-
-
-
-
-
+console.log(`Using cookies file: ${COOKIE_FILE}`);
+if (!fs.existsSync(COOKIE_FILE)) {
+    console.error(`Cookies file not found: ${COOKIE_FILE}`);
+} else {
+    console.log(`Cookies file found: ${COOKIE_FILE}`);
+}
 
 async function downloadSong(song) {
     const downloadId = crypto.randomUUID();
@@ -85,14 +89,6 @@ async function downloadSong(song) {
     });
 }
 
-
-
-
-const OUTPUT_DIR = path.join(process.cwd(), 'downloads');
-if (!fs.existsSync(OUTPUT_DIR)) {
-    fs.mkdirSync(OUTPUT_DIR);
-}
-
 const downloads = new Map();
 const searchCache = new Map();
 const trendingCache = new Map();
@@ -108,11 +104,8 @@ const HEADERS = {
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Referer': 'https://www.youtube.com/',
+    'Cookie': COOKIE_FILE
 };
-
-
-
-
 
 async function searchSongs(query) {
     const cacheKey = query.toLowerCase();
@@ -277,60 +270,6 @@ function isValidDuration(duration) {
     return true;
 }
 
-async function downloadSong(song) {
-    const downloadId = crypto.randomUUID();
-    const safeFileName = `${song.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp3`.substring(0, 200);
-    const outputPath = path.join(OUTPUT_DIR, safeFileName);
-
-    return new Promise((resolve, reject) => {
-        const process = spawn('yt-dlp', [
-            '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '0',
-            '--cookies', COOKIE_FILE,  // Add cookies file
-            '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
-            '--sponsorblock-remove', 'all',
-            '--force-keyframes-at-cuts',
-            '--no-playlist',
-            '--embed-thumbnail',
-            '--no-warnings',
-            '--no-progress',
-            `https://youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
-        ]);
-
-        // Rest of the function remains the same
-        let errorOutput = '';
-
-        process.stderr.on('data', (data) => {
-            errorOutput += data.toString();
-        });
-
-        const timeout = setTimeout(() => {
-            process.kill();
-            reject(new Error('Download timed out'));
-        }, 5 * 60 * 1000);
-
-        process.on('close', (code) => {
-            clearTimeout(timeout);
-            if (code === 0) {
-                resolve({
-                    downloadId,
-                    fileName: safeFileName,
-                    filePath: outputPath
-                });
-            } else {
-                reject(new Error(`Download failed: ${errorOutput}`));
-            }
-        });
-
-        process.on('error', (error) => {
-            clearTimeout(timeout);
-            reject(error);
-        });
-    });
-}
-
 async function downloadVideo(video, format) {
     const downloadId = crypto.randomUUID();
     const safeFileName = `${video.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp4`.substring(0, 200);
@@ -387,9 +326,6 @@ async function downloadVideo(video, format) {
         });
     });
 }
-
-
-
 
 // In your Express server code, add these constants at the top
 const ITEMS_PER_PAGE = 12;
@@ -655,7 +591,7 @@ app.get('/api/video-qualities', async (req, res) => {
                     const qualityLabel = `${height}p MP4`;
 
                     const fpsMatch = line.match(/(\d+)fps/);
-                    const fps = fpsMatch ? fpsMatch[1] : '24';
+                    const fps = fpsMatch ? fps[1] : '24';
                     
                     // Check if this format includes audio
                     const hasAudio = !line.includes('video only');

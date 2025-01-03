@@ -114,7 +114,7 @@ async function testProxy(proxyConfig) {
 // Example usage:
 const proxyConfig = {
     host: '8.219.131.17',
-    port: 3128,
+    port: 3002,
     type: 'http',
     timeout: 30000  // 30 seconds
 };
