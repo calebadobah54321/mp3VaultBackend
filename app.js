@@ -74,27 +74,23 @@ async function downloadSong(song) {
         const ytdlpArgs = [
             '--extract-audio',
             '--audio-format', 'mp3',
-            // Get best audio quality available
-            '--format', 'bestaudio/best',
+            // Use best audio only instead of best overall
+            '--format', 'bestaudio',
             '--cookies', COOKIE_FILE,
-            // High quality MP3 encoding settings
-            '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 320k',
-            // Increase concurrent fragments for faster downloading
-            '--concurrent-fragments', '8',
-            // Remove unnecessary post-processing steps
+            // Increase concurrent downloads
+            '--concurrent-fragments', '16',
+            // Remove unnecessary post-processing
             '--no-embed-thumbnail',
-            '--no-add-metadata',
-            '--no-playlist',
-            '--no-warnings',
+            '--no-metadata',
+            '--no-part',
+            // Add continue flag to skip download if file exists
+            '--continue',
+            // Disable progress output to reduce overhead
             '--no-progress',
-            '--ignore-errors',
-            // Optimize sponsorblock settings
-            '--sponsorblock-remove', 'sponsor,selfpromo',
-            '--force-keyframes-at-cuts',
+            '--quiet',
             `https://youtube.com/watch?v=${song.youtubeId}`,
             '-o', outputPath
         ];
-
         const process = spawn('yt-dlp', ytdlpArgs, {
             stdio: ['ignore', 'pipe', 'pipe']
         });
