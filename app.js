@@ -6,9 +6,12 @@ const fs = require('fs');
 const app = express();
 const port = process.env.PORT || 3002;
 const crypto = require('crypto');
-const COOKIE_FILE = path.join(process.cwd(), 'cookie.txt');
+const COOKIE_FILE = path.join(process.cwd(), 'cookies.txt');
 const COOKIE_ACCESS_KEY = "c3f543af8a254f65c80d83489cb31d462badef801407e6a575c7da86c3988398";
 const RenderCookieManager = require('./RenderCookieManager');
+
+console.log('Current working directory:', process.cwd());
+console.log('Cookie file absolute path:', path.resolve(COOKIE_FILE));
 
 const cookieManager = new RenderCookieManager({
     sourceUrl: 'https://api.mp3vault.xyz',
