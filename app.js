@@ -81,7 +81,7 @@ async function downloadSong(song) {
             '--concurrent-fragments', '16',
             // Remove unnecessary post-processing
             '--no-embed-thumbnail',
-            '--no-metadata',
+            '--no-add-metadata',
             '--no-part',
             // Add continue flag to skip download if file exists
             '--continue',
