@@ -3,18 +3,49 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3002;
-const { COOKIE_FILE, initializeCookies } = require('./cookies');
+const crypto = require('crypto');
+const COOKIE_FILE = path.join(process.cwd(), 'cookie.txt');
+const COOKIE_ACCESS_KEY = "c3f543af8a254f65c80d83489cb31d462badef801407e6a575c7da86c3988398";
+const RenderCookieManager = require('./RenderCookieManager');
+
+const cookieManager = new RenderCookieManager({
+    sourceUrl: 'https://api.mp3vault.xyz',
+    accessKey: "c3f543af8a254f65c80d83489cb31d462badef801407e6a575c7da86c3988398",
+    refreshInterval: 5 * 60 * 1000 // 5 minutes
+});
+
+
+
+app.get('/api/cookie-status', (req, res) => {
+    res.json(cookieManager.getStatus());
+});
+
+
 
 app.use(cors());
+// app.use(cors({
+//     origin: ['http://localhost:3000', 'https://your-vercel-domain.vercel.app'],
+//     credentials: true
+//   }));
+
 app.use(express.json());
 
 const OUTPUT_DIR = path.join(process.cwd(), 'downloads');
 if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR);
 }
+
+process.on('SIGINT', async () => {
+    console.log('Cleaning up resources...');
+    await cookieManager.stop();
+    for (const page of PAGE_POOL.values()) {
+        await page.close();
+    }
+    if (browser) await browser.close();
+    process.exit();
+});
 
 console.log(`Using cookies file: ${COOKIE_FILE}`);
 if (!fs.existsSync(COOKIE_FILE)) {
@@ -25,39 +56,61 @@ if (!fs.existsSync(COOKIE_FILE)) {
 
 async function downloadSong(song) {
     const downloadId = crypto.randomUUID();
-    const safeFileName = `${song.title.replace(/[^a-z0-9]/gi, '_')}_${downloadId}.mp3`.substring(0, 200);
+    
+    // Better filename formatting: replace multiple spaces with single space, 
+    // keep alphanumeric chars, spaces, and basic punctuation
+    const safeFileName = `${song.title
+        .replace(/[^\w\s-.,()[\]'&]/g, '') // Keep alphanumeric, spaces, and basic punctuation
+        .replace(/\s+/g, ' ')              // Replace multiple spaces with single space
+        .trim()}_${downloadId}.mp3`
+        .substring(0, 200);
+    
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
 
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
             '--extract-audio',
             '--audio-format', 'mp3',
-            '--audio-quality', '0',
-            '--cookies', COOKIE_FILE,  // Use cookies file for authentication
-            '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 192k',
-            '--sponsorblock-remove', 'all',
-            '--force-keyframes-at-cuts',
+            // Get best audio quality available
+            '--format', 'bestaudio/best',
+            '--cookies', COOKIE_FILE,
+            // High quality MP3 encoding settings
+            '--postprocessor-args', '-acodec libmp3lame -ac 2 -b:a 320k',
+            // Increase concurrent fragments for faster downloading
+            '--concurrent-fragments', '8',
+            // Remove unnecessary post-processing steps
+            '--no-embed-thumbnail',
+            '--no-add-metadata',
             '--no-playlist',
-            '--embed-thumbnail',
             '--no-warnings',
-            '--verbose',
+            '--no-progress',
+            '--ignore-errors',
+            // Optimize sponsorblock settings
+            '--sponsorblock-remove', 'sponsor,selfpromo',
+            '--force-keyframes-at-cuts',
             `https://youtube.com/watch?v=${song.youtubeId}`,
             '-o', outputPath
         ];
 
-        const process = spawn('yt-dlp', ytdlpArgs);
+        const process = spawn('yt-dlp', ytdlpArgs, {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
 
         let errorOutput = '';
         let stdoutOutput = '';
 
         process.stdout.on('data', (data) => {
             stdoutOutput += data.toString();
-            console.log('yt-dlp stdout:', data.toString());
+            if (data.toString().includes('ERROR') || data.toString().includes('WARNING')) {
+                console.log('yt-dlp stdout:', data.toString().trim());
+            }
         });
 
         process.stderr.on('data', (data) => {
             errorOutput += data.toString();
-            console.error('yt-dlp stderr:', data.toString());
+            if (!data.toString().includes('[debug]')) {
+                console.error('yt-dlp stderr:', data.toString().trim());
+            }
         });
 
         const timeout = setTimeout(() => {
@@ -67,7 +120,8 @@ async function downloadSong(song) {
 
         process.on('close', (code) => {
             clearTimeout(timeout);
-            if (code === 0) {
+            
+            if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
                 resolve({
                     downloadId,
                     fileName: safeFileName,
@@ -104,7 +158,14 @@ const HEADERS = {
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Referer': 'https://www.youtube.com/',
-    'Cookie': COOKIE_FILE
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'document',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-site': 'none',
+    'sec-fetch-user': '?1',
+    'upgrade-insecure-requests': '1'
 };
 
 async function searchSongs(query) {
@@ -276,20 +337,16 @@ async function downloadVideo(video, format) {
     const outputPath = path.join(OUTPUT_DIR, safeFileName);
   
     return new Promise((resolve, reject) => {
-        // Basic yt-dlp arguments
         const ytdlpArgs = [
             '--no-playlist',
             '--no-warnings',
             '--no-progress',
-            '--cookies', COOKIE_FILE,
-            '-f', format,  // Will handle both single formats and format+audio combinations
+            '--cookies', COOKIE_FILE,  // Add cookies file here
+            '-f', format,
             '--merge-output-format', 'mp4',
             '--audio-quality', '0',
             '--add-metadata',
             '--embed-thumbnail',
-            '--add-header', `Authorization: ${tokenData.token_type} ${tokenData.access_token}`,
-            `https://youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
             `https://youtube.com/watch?v=${video.youtubeId}`,
             '-o', outputPath
         ];
@@ -300,12 +357,13 @@ async function downloadVideo(video, format) {
 
         process.stderr.on('data', (data) => {
             errorOutput += data.toString();
+            console.error('yt-dlp stderr:', data.toString()); // Add logging
         });
 
         const timeout = setTimeout(() => {
             process.kill();
             reject(new Error('Download timed out'));
-        }, 10 * 60 * 1000); // 10 minutes timeout for video downloads
+        }, 10 * 60 * 1000);
 
         process.on('close', (code) => {
             clearTimeout(timeout);
@@ -326,6 +384,40 @@ async function downloadVideo(video, format) {
         });
     });
 }
+function cleanupDownloads() {
+    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+    const now = Date.now();
+
+    fs.readdir(OUTPUT_DIR, (err, files) => {
+        if (err) {
+            console.error('Error reading downloads directory:', err);
+            return;
+        }
+
+        files.forEach(file => {
+            const filePath = path.join(OUTPUT_DIR, file);
+            fs.stat(filePath, (err, stats) => {
+                if (err) {
+                    console.error('Error stating file:', err);
+                    return;
+                }
+
+                if (now - stats.mtimeMs > maxAge) {
+                    fs.unlink(filePath, err => {
+                        if (err) {
+                            console.error('Error deleting old file:', err);
+                        } else {
+                            console.log('Cleaned up old file:', file);
+                        }
+                    });
+                }
+            });
+        });
+    });
+}
+
+// Run cleanup every 6 hours
+setInterval(cleanupDownloads, 6 * 60 * 60 * 1000);
 
 // In your Express server code, add these constants at the top
 const ITEMS_PER_PAGE = 12;
@@ -523,9 +615,11 @@ app.get('/api/video-qualities', async (req, res) => {
         let isResponseSent = false;
         const process = spawn('yt-dlp', [
             '-F',
+            '--cookies', COOKIE_FILE,  // Add cookies file here
             `https://youtube.com/watch?v=${youtubeId}`
         ]);
   
+        // Rest of the function remains the same...
         let output = '';
         let errorOutput = '';
 
@@ -563,18 +657,14 @@ app.get('/api/video-qualities', async (req, res) => {
                 .split('\n')
                 .filter(line => line.includes('audio only') && line.includes('mp4a'));
             
-            // Get the best audio format ID (usually the last one in the filtered list)
             const bestAudioFormat = audioFormats.length > 0 ? 
-                audioFormats[audioFormats.length - 1].split(/\s+/)[0] : '140'; // 140 is usually the best audio
+                audioFormats[audioFormats.length - 1].split(/\s+/)[0] : '140';
 
             const formats = output
                 .split('\n')
                 .filter(line => {
-                    // Only include lines that start with a number and are mp4 format
                     if (!line.match(/^[0-9]+\s+mp4/)) return false;
-                    
-                    // Include video formats (both with and without audio)
-                    return line.includes('x');  // Check for resolution
+                    return line.includes('x');
                 })
                 .map(line => {
                     const parts = line.trim().split(/\s+/);
@@ -591,13 +681,12 @@ app.get('/api/video-qualities', async (req, res) => {
                     const qualityLabel = `${height}p MP4`;
 
                     const fpsMatch = line.match(/(\d+)fps/);
-                    const fps = fpsMatch ? fps[1] : '24';
+                    const fps = fpsMatch ? fpsMatch[1] : '24';
                     
-                    // Check if this format includes audio
                     const hasAudio = !line.includes('video only');
                     
                     return {
-                        formatId: hasAudio ? formatId : `${formatId}+${bestAudioFormat}`, // Combine with audio if needed
+                        formatId: hasAudio ? formatId : `${formatId}+${bestAudioFormat}`,
                         ext,
                         resolution,
                         filesize,
@@ -612,7 +701,6 @@ app.get('/api/video-qualities', async (req, res) => {
                     return heightB - heightA;
                 });
 
-            // Filter out duplicate resolutions, keeping the best quality version
             const uniqueFormats = formats.reduce((acc, current) => {
                 const resolution = current.resolution.split('x')[1];
                 const existing = acc.find(f => f.resolution.split('x')[1] === resolution);
@@ -623,7 +711,6 @@ app.get('/api/video-qualities', async (req, res) => {
                 return acc;
             }, []);
 
-            console.log('Available formats:', uniqueFormats);
             res.json({ qualities: uniqueFormats });
         });
 
@@ -642,34 +729,62 @@ app.get('/api/video-qualities', async (req, res) => {
         }
     }
 });
+ 
 
-app.get('/api/oauth/status', async (req, res) => {
+app.get('/api/fetch-cookies', (req, res) => {
     try {
-        const tokenData = await getValidToken();
-        const testResponse = await fetch('https://www.googleapis.com/youtube/v3/channels?part=id&mine=true', {
-            headers: {
-                'Authorization': `${tokenData.token_type} ${tokenData.access_token}`
-            }
-        });
-        
-        if (!testResponse.ok) {
-            throw new Error(`Token validation failed: ${testResponse.status} ${testResponse.statusText}`);
+        // Verify access key
+        const providedKey = req.headers['x-cookie-access-key'];
+        if (!providedKey || providedKey !== COOKIE_ACCESS_KEY) {
+            return res.status(401).json({ error: 'Unauthorized access' });
         }
 
-        const data = await testResponse.json();
-        res.json({ 
-            status: 'valid',
-            tokenExpires: new Date(tokenData.expires * 1000),
-            channelInfo: data
+        // Check if cookie file exists
+        if (!fs.existsSync(COOKIE_FILE)) {
+            return res.status(404).json({ error: 'Cookie file not found' });
+        }
+
+        // Read cookie file
+        const cookieData = fs.readFileSync(COOKIE_FILE, 'utf8');
+        
+        // Get cookie file stats
+        const stats = fs.statSync(COOKIE_FILE);
+
+        res.json({
+            cookies: cookieData,
+            lastModified: stats.mtime,
+            fileSize: stats.size
         });
     } catch (error) {
-        res.status(500).json({ 
-            status: 'invalid',
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-        });
+        console.error('Error serving cookie file:', error);
+        res.status(500).json({ error: 'Failed to read cookie file' });
     }
-});  
+});
+
+// Add an endpoint to check cookie status
+app.get('/api/cookie-health', (req, res) => {
+    try {
+        // Verify access key
+        const providedKey = req.headers['x-cookie-access-key'];
+        if (!providedKey || providedKey !== COOKIE_ACCESS_KEY) {
+            return res.status(401).json({ error: 'Unauthorized access' });
+        }
+
+        const stats = fs.existsSync(COOKIE_FILE) ? fs.statSync(COOKIE_FILE) : null;
+        const cookieManager = CookieManager.getInstance();
+
+        res.json({
+            cookieExists: fs.existsSync(COOKIE_FILE),
+            lastModified: stats ? stats.mtime : null,
+            fileSize: stats ? stats.size : 0,
+            managerStatus: cookieManager.getStatus()
+        });
+    } catch (error) {
+        console.error('Error checking cookie health:', error);
+        res.status(500).json({ error: 'Failed to check cookie status' });
+    }
+});
+
 
 app.get('/api/countries', (req, res) => {
     const supportedCountries = [
@@ -687,6 +802,8 @@ app.get('/api/countries', (req, res) => {
     
     res.json({ countries: supportedCountries });
 });
+
+
 
 app.get('/api/stream/:videoId', async (req, res) => {
     try {
@@ -747,7 +864,13 @@ process.on('SIGINT', async () => {
     process.exit();
 });
 
+
 app.listen(port, async () => {
-    await initializeCookies();
     console.log(`Server running at http://localhost:${port}`);
+    try {
+        await cookieManager.start();
+        console.log('Cookie manager started successfully');
+    } catch (error) {
+        console.error('Failed to start cookie manager:', error);
+    }
 });
