@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -9,6 +8,9 @@ const crypto = require('crypto');
 const COOKIE_FILE = path.join(process.cwd(), 'cookies.txt');
 const COOKIE_ACCESS_KEY = "c3f543af8a254f65c80d83489cb31d462badef801407e6a575c7da86c3988398";
 const RenderCookieManager = require('./RenderCookieManager');
+const cors = require('cors');
+
+app.use(cors());
 
 console.log('Current working directory:', process.cwd());
 console.log('Cookie file absolute path:', path.resolve(COOKIE_FILE));
@@ -27,7 +29,7 @@ app.get('/api/cookie-status', (req, res) => {
 
 
 
-app.use(cors());
+// app.use(cors());
 // app.use(cors({
 //     origin: ['http://localhost:3000', 'https://your-vercel-domain.vercel.app'],
 //     credentials: true
@@ -59,12 +61,9 @@ if (!fs.existsSync(COOKIE_FILE)) {
 
 async function downloadSong(song) {
     const downloadId = crypto.randomUUID();
-    
-    // Better filename formatting: replace multiple spaces with single space, 
-    // keep alphanumeric chars, spaces, and basic punctuation
     const safeFileName = `${song.title
-        .replace(/[^\w\s-.,()[\]'&]/g, '') // Keep alphanumeric, spaces, and basic punctuation
-        .replace(/\s+/g, ' ')              // Replace multiple spaces with single space
+        .replace(/[^\w\s-.,()[\]'&]/g, '')
+        .replace(/\s+/g, ' ')
         .trim()}_${downloadId}.mp3`
         .substring(0, 200);
     
@@ -72,38 +71,21 @@ async function downloadSong(song) {
 
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
+            '--format', 'bestaudio[ext=m4a]',
             '--extract-audio',
             '--audio-format', 'mp3',
-            // Use best audio only instead of best overall
-            '--format', 'bestaudio',
+            '--audio-quality', '0',
             '--cookies', COOKIE_FILE,
-            // Increase concurrent downloads
-            '--concurrent-fragments', '16',
-            // Remove unnecessary post-processing
-            '--no-embed-thumbnail',
-            '--no-add-metadata',
-            '--no-part',
-            // Add continue flag to skip download if file exists
-            '--continue',
-            // Disable progress output to reduce overhead
+            '--no-playlist',
+            '--no-warnings',
             '--no-progress',
-            '--quiet',
-            `https://youtube.com/watch?v=${song.youtubeId}`,
+            '--ignore-errors',
+            `https://music.youtube.com/watch?v=${song.youtubeId}`,
             '-o', outputPath
         ];
-        const process = spawn('yt-dlp', ytdlpArgs, {
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
 
+        const process = spawn('yt-dlp', ytdlpArgs);
         let errorOutput = '';
-        let stdoutOutput = '';
-
-        process.stdout.on('data', (data) => {
-            stdoutOutput += data.toString();
-            if (data.toString().includes('ERROR') || data.toString().includes('WARNING')) {
-                console.log('yt-dlp stdout:', data.toString().trim());
-            }
-        });
 
         process.stderr.on('data', (data) => {
             errorOutput += data.toString();
@@ -119,28 +101,24 @@ async function downloadSong(song) {
 
         process.on('close', (code) => {
             clearTimeout(timeout);
-            
-            if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+            if (code === 0 && fs.existsSync(outputPath)) {
                 resolve({
                     downloadId,
                     fileName: safeFileName,
                     filePath: outputPath
                 });
             } else {
-                console.error('yt-dlp failed with code:', code);
-                console.error('Error output:', errorOutput);
-                console.error('Stdout output:', stdoutOutput);
                 reject(new Error(`Download failed (code ${code}): ${errorOutput}`));
             }
         });
 
         process.on('error', (error) => {
             clearTimeout(timeout);
-            console.error('yt-dlp process error:', error);
             reject(error);
         });
     });
 }
+
 
 const downloads = new Map();
 const searchCache = new Map();
@@ -176,38 +154,100 @@ async function searchSongs(query) {
     }
 
     try {
-        // Make two searches: one for audio, one for music videos
-        const audioQuery = encodeURIComponent(query + ' audio');
-        const videoQuery = encodeURIComponent(query);
+        const encodedQuery = encodeURIComponent(query);
+        const url = `https://music.youtube.com/youtubei/v1/search?key=AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30`;
         
-        // Search URLs for both types
-        const audioUrl = `https://www.youtube.com/results?search_query=${audioQuery}&sp=EgIQAQ%253D%253D`;
-        const videoUrl = `https://www.youtube.com/results?search_query=${videoQuery}&sp=EgIQAUICCAE%253D`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                ...HEADERS,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                context: {
+                    client: {
+                        clientName: 'WEB_REMIX',
+                        clientVersion: '1.20240101.01.00',
+                        visitorData: 'CgtsWkNKN3dkX29Paz0%3D',
+                    },
+                },
+                query: query,
+                params: 'EgWKAQIIAWoKEAMQBBAJEAoQBQ%3D%3D' // This params value filters for songs only
+            })
+        });
 
-        // Fetch both searches
-        const [audioResponse, videoResponse] = await Promise.all([
-            fetch(audioUrl, { headers: HEADERS }),
-            fetch(videoUrl, { headers: HEADERS })
-        ]);
+        const data = await response.json();
+        const results = [];
 
-        const [audioHtml, videoHtml] = await Promise.all([
-            audioResponse.text(),
-            videoResponse.text()
-        ]);
+        // First check for the songs section
+        const contents = data?.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents;
+        
+        if (contents) {
+            for (const section of contents) {
+                // Only process if it's a music shelf (songs section)
+                const musicShelf = section?.musicShelfRenderer;
+                if (!musicShelf) continue;
 
-        // Process both result sets
-        const audioResults = await processSearchResults(audioHtml, true);
-        const videoResults = await processSearchResults(videoHtml, false);
+                const items = musicShelf.contents || [];
+                for (const item of items) {
+                    const renderer = item.musicResponsiveListItemRenderer;
+                    if (!renderer) continue;
 
-        // Combine and deduplicate results with new priority
-        const combinedResults = mergeAndDeduplicateResults(audioResults, videoResults);
+                    const videoId = renderer.playlistItemData?.videoId || 
+                                  renderer.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.navigationEndpoint?.watchEndpoint?.videoId;
+                                  
+                    if (!videoId) continue;
+
+                    // Extract song details
+                    const title = renderer.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text;
+                    
+                    // Get artist and album info
+                    const flexColumns = renderer.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || [];
+                    const artistInfo = [];
+                    let currentText = '';
+                    
+                    for (const run of flexColumns) {
+                        if (run.text === ' • ') {
+                            if (currentText) artistInfo.push(currentText);
+                            currentText = '';
+                        } else {
+                            currentText += run.text;
+                        }
+                    }
+                    if (currentText) artistInfo.push(currentText);
+
+                    const artist = artistInfo[0] || 'Unknown Artist';
+                    const album = artistInfo[1] || '';
+                    
+                    // Get thumbnail
+                    const thumbnails = renderer.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
+                    const thumbnail = thumbnails[thumbnails.length - 1]?.url;
+
+                    // Get duration
+                    const durationRuns = renderer.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs;
+                    const duration = durationRuns?.find(run => /\d+:\d+/.test(run.text))?.text || '';
+
+                    if (title && videoId) {
+                        results.push({
+                            title,
+                            youtubeId: videoId,
+                            thumbnail,
+                            channelName: artist,
+                            album,
+                            duration,
+                            isAudioVersion: true
+                        });
+                    }
+                }
+            }
+        }
 
         searchCache.set(cacheKey, {
-            results: combinedResults,
+            results,
             timestamp: Date.now()
         });
 
-        return combinedResults;
+        return results;
     } catch (error) {
         console.error('Search error:', error);
         throw new Error('Search failed');
@@ -427,20 +467,12 @@ const allVideosCache = new Map();
 
 async function getTrendingSongs(countryCode = 'US', page = 1) {
     const cacheKey = countryCode.toUpperCase();
-    
-    // Try to get all videos from cache first
     let allVideos = allVideosCache.get(cacheKey)?.videos;
     const cacheTimestamp = allVideosCache.get(cacheKey)?.timestamp;
 
-    // Check if we need to fetch fresh data
-    const needsFresh = !allVideos || 
-                      !cacheTimestamp || 
-                      (Date.now() - cacheTimestamp > TRENDING_CACHE_DURATION);
-
-    if (needsFresh) {
+    if (!allVideos || !cacheTimestamp || (Date.now() - cacheTimestamp > TRENDING_CACHE_DURATION)) {
         try {
-            // Fetch fresh data
-            const url = `https://www.youtube.com/feed/trending?bp=4gINGgt5dG1hX2NoYXJ0cw%3D%3D&gl=${countryCode}`;
+            const url = `https://music.youtube.com/trending?gl=${countryCode}`;
             const response = await fetch(url, {
                 headers: {
                     ...HEADERS,
@@ -449,82 +481,27 @@ async function getTrendingSongs(countryCode = 'US', page = 1) {
             });
 
             const html = await response.text();
-            const initialDataMatch = html.match(/var ytInitialData = (.+?);<\/script>/);
+            allVideos = await processSearchResults(html);
             
-            if (!initialDataMatch) {
-                throw new Error('Could not find initial data');
-            }
-
-            const data = JSON.parse(initialDataMatch[1]);
-            const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
-            allVideos = [];
-
-            for (const tab of tabs) {
-                const tabContent = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
-                for (const section of tabContent) {
-                    const items = section?.itemSectionRenderer?.contents?.[0]?.shelfRenderer?.content?.expandedShelfContentsRenderer?.items || [];
-                    
-                    for (const item of items) {
-                        const videoRenderer = item.videoRenderer;
-                        if (!videoRenderer) continue;
-
-                        const lengthText = videoRenderer?.lengthText?.simpleText;
-                        if (!lengthText || isLiveStream(videoRenderer) || !isValidDuration(lengthText)) {
-                            continue;
-                        }
-
-                        const thumbnails = videoRenderer.thumbnail?.thumbnails || [];
-                        const thumbnail = thumbnails.length > 0 
-                            ? thumbnails[thumbnails.length - 1].url
-                            : `https://i.ytimg.com/vi/${videoRenderer.videoId}/hqdefault.jpg`;
-
-                        allVideos.push({
-                            title: videoRenderer.title.runs[0].text,
-                            youtubeId: videoRenderer.videoId,
-                            duration: lengthText,
-                            views: videoRenderer.viewCountText?.simpleText || '0 views',
-                            channelName: videoRenderer.ownerText?.runs[0]?.text || 'Unknown Channel',
-                            thumbnail: thumbnail,
-                            countryCode
-                        });
-                    }
-                }
-            }
-
-            // Store all videos in cache
             allVideosCache.set(cacheKey, {
                 videos: allVideos,
                 timestamp: Date.now()
             });
-
         } catch (error) {
             console.error(`Error fetching trending songs for ${countryCode}:`, error);
             throw error;
         }
     }
 
-    // If we still don't have videos, something went wrong
-    if (!allVideos || allVideos.length === 0) {
-        throw new Error(`No trending videos found for country: ${countryCode}`);
-    }
-
-    // Limit total results to MAX_ITEMS
-    allVideos = allVideos.slice(0, MAX_ITEMS);
-
-    // Calculate pagination
     const startIndex = (page - 1) * ITEMS_PER_PAGE;
     const endIndex = Math.min(startIndex + ITEMS_PER_PAGE, allVideos.length);
-    const paginatedVideos = allVideos.slice(startIndex, endIndex);
-    const hasMore = endIndex < allVideos.length;
-
-    console.log(`Returning page ${page}, videos ${startIndex} to ${endIndex} of ${allVideos.length}`);
-
     return {
-        videos: paginatedVideos,
-        hasMore,
+        videos: allVideos.slice(startIndex, endIndex),
+        hasMore: endIndex < allVideos.length,
         totalVideos: allVideos.length
     };
 }
+
 
 app.get('/api/search', async (req, res) => {
     try {
@@ -806,53 +783,36 @@ app.get('/api/countries', (req, res) => {
 
 app.get('/api/stream/:videoId', async (req, res) => {
     try {
-      const { videoId } = req.params;
-      
-      // Set headers for audio streaming
-      res.setHeader('Content-Type', 'audio/mp3');
-      res.setHeader('Transfer-Encoding', 'chunked');
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Cache-Control', 'no-cache');
-  
-      // Create yt-dlp process for streaming
-      const process = spawn('yt-dlp', [
-        '-f', 'bestaudio[ext=m4a]',
-        '--cookies', COOKIE_FILE,  // Add cookies file
-        '-o', '-',  // Output to stdout
-        '--no-warnings',
-        '--no-playlist',
-        '--quiet',
-        `https://youtube.com/watch?v=${videoId}`
-      ]);
-  
-      // Handle process errors
-      process.on('error', (error) => {
-        console.error('Stream process error:', error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Streaming failed' });
-        }
-      });
-  
-      // Handle stderr
-      process.stderr.on('data', (data) => {
-        console.error(`Stream stderr: ${data}`);
-      });
-  
-      // Pipe the output directly to response
-      process.stdout.pipe(res);
-  
-      // Clean up on client disconnect
-      res.on('close', () => {
-        process.kill();
-      });
-  
+        const { videoId } = req.params;
+        
+        res.setHeader('Content-Type', 'audio/mp3');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        
+        const process = spawn('yt-dlp', [
+            '--format', 'bestaudio[ext=m4a]',
+            '--cookies', COOKIE_FILE,
+            '-o', '-',
+            '--no-warnings',
+            '--quiet',
+            `https://music.youtube.com/watch?v=${videoId}`
+        ]);
+
+        process.on('error', (error) => {
+            console.error('Stream error:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Streaming failed' });
+            }
+        });
+
+        process.stdout.pipe(res);
+        
+        res.on('close', () => process.kill());
     } catch (error) {
-      console.error('Streaming error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: error.message });
-      }
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
-  });
+});
 
 process.on('SIGINT', async () => {
     console.log('Cleaning up browser resources...');
@@ -864,7 +824,7 @@ process.on('SIGINT', async () => {
 });
 
 
-app.listen(port, async () => {
+app.listen(port,'0.0.0.0', async () => {
     console.log(`Server running at http://localhost:${port}`);
     try {
         await cookieManager.start();
