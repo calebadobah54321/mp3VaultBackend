@@ -71,17 +71,13 @@ async function downloadSong(song) {
 
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
-            '--format', 'bestaudio[ext=m4a]',
-            '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '0',
-            '--cookies', COOKIE_FILE,
+            '--format', '251/250/249/140', // Audio-only formats in order of preference
             '--no-playlist',
             '--no-warnings',
             '--no-progress',
-            '--ignore-errors',
-            `https://music.youtube.com/watch?v=${song.youtubeId}`,
-            '-o', outputPath
+            '--cookies', COOKIE_FILE,
+            '-o', outputPath,
+            `https://music.youtube.com/watch?v=${song.youtubeId}`
         ];
 
         const process = spawn('yt-dlp', ytdlpArgs);
@@ -89,15 +85,12 @@ async function downloadSong(song) {
 
         process.stderr.on('data', (data) => {
             errorOutput += data.toString();
-            if (!data.toString().includes('[debug]')) {
-                console.error('yt-dlp stderr:', data.toString().trim());
-            }
         });
 
         const timeout = setTimeout(() => {
             process.kill();
             reject(new Error('Download timed out'));
-        }, 5 * 60 * 1000);
+        }, 30000); // 30 second timeout
 
         process.on('close', (code) => {
             clearTimeout(timeout);
